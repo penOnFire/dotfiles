@@ -1,0 +1,31 @@
+# ==========================================
+# Credentials, Private Tokens & Cookies
+# ==========================================
+*.cookie
+*sp_dc
+!sp_dc.example
+token.json
+.last_cleaned
+.last_month
+
+# ==========================================
+# Cache & Temporary Files
+# ==========================================
+.cache/
+*.log
+*.tmp
+*.bak
+*backup*
+*before-rice*
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ==========================================
+# Video & Media Cache
+# ==========================================
+*.mp4
+*.none
+__pycache__/
+*.pyc

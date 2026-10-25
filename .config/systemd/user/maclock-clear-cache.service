@@ -1,0 +1,7 @@
+[Unit]
+Description=Clear MacLock Spotify Canvas and Lyrics Cache
+Documentation=file:///home/seanizonfire/.config/quickshell/MacLock/clear-cache.sh
+
+[Service]
+Type=oneshot
+ExecStart=/home/seanizonfire/.config/quickshell/MacLock/clear-cache.sh

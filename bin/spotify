@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec /home/seanizonfire/.local/share/spotify/spotify --enable-features=UseOzonePlatform --ozone-platform=wayland "$@"
