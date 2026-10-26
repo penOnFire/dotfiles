@@ -31,6 +31,7 @@ RESET = "\033[0m"
 
 class FingerprintTester:
     def __init__(self):
+        self._reset_usb_sensor()
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         self.loop = GLib.MainLoop()
         self.username = pwd.getpwuid(os.getuid()).pw_name
@@ -45,6 +46,28 @@ class FingerprintTester:
         signal.signal(signal.SIGTERM, self.cleanup)
 
         self._connect_dbus()
+
+    @staticmethod
+    def _reset_usb_sensor():
+        try:
+            import ctypes, ctypes.util
+            libusb = ctypes.CDLL(ctypes.util.find_library('usb-1.0'))
+            ctx = ctypes.c_void_p()
+            libusb.libusb_init(ctypes.byref(ctx))
+            handle = libusb.libusb_open_device_with_vid_pid(ctx, 0x2808, 0xc6d5)
+            if handle:
+                pkt = bytearray([0x02, 0x00, 0x02, 0x82, 0x78, 0x02 ^ 0x82 ^ 0x78])
+                trans = ctypes.c_int()
+                buf = (ctypes.c_ubyte * len(pkt))(*pkt)
+                if libusb.libusb_claim_interface(handle, 0) == 0:
+                    libusb.libusb_bulk_transfer(handle, 0x01, buf, len(pkt), ctypes.byref(trans), 500)
+                    rbuf = (ctypes.c_ubyte * 64)()
+                    libusb.libusb_bulk_transfer(handle, 0x82, rbuf, 64, ctypes.byref(trans), 500)
+                    libusb.libusb_release_interface(handle, 0)
+                libusb.libusb_close(handle)
+            libusb.libusb_exit(ctx)
+        except Exception:
+            pass
 
     def _connect_dbus(self):
         try:
