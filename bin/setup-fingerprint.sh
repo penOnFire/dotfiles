@@ -83,6 +83,26 @@ systemctl restart polkit 2>/dev/null || true
 LIB_DIR="/usr/lib/x86_64-linux-gnu"
 ALT_LIB_DIR="/lib/x86_64-linux-gnu"
 
+echo "[*] Stopping fprintd service..."
+systemctl stop fprintd 2>/dev/null || true
+pkill -9 -f fprintd 2>/dev/null || true
+
+echo "[*] Re-initializing USB hardware sensor..."
+for dev in /sys/bus/usb/devices/*; do
+    if [[ -r "$dev/idVendor" && -r "$dev/idProduct" ]]; then
+        if [[ "$(< "$dev/idVendor")" == "$DEVICE_VENDOR_ID" && "$(< "$dev/idProduct")" == "$DEVICE_PRODUCT_ID" ]]; then
+            if [[ -w "$dev/authorized" ]]; then
+                echo "[*] Power cycling USB sensor ($dev)..."
+                echo 0 > "$dev/authorized"
+                sleep 0.5
+                echo 1 > "$dev/authorized"
+                sleep 1
+            fi
+            break
+        fi
+    fi
+done
+
 echo "[*] Removing poisoned .bak libraries and pointing symlinks to patched driver..."
 rm -f "$LIB_DIR/libfprint-2.so.2.0.0.bak" "$ALT_LIB_DIR/libfprint-2.so.2.0.0.bak" 2>/dev/null || true
 
