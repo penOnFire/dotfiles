@@ -23,16 +23,12 @@ if lsusb -d 2808:c6d5 >/dev/null 2>&1; then
     echo "[+] Found FocalTech Fingerprint Device (ID 2808:c6d5)!"
 else
     echo "[!] Warning: USB device 2808:c6d5 not detected via lsusb."
-    echo "    Continuing anyway..."
 fi
 
-# 1. Install dependencies and system packages if needed
-echo "[*] Ensuring fprintd, libpam-fprintd, and system packages are installed..."
+# 1. Ensure fprintd and libpam-fprintd packages are installed
+echo "[*] Ensuring fprintd and libpam-fprintd packages are installed..."
 apt-get update -qq
-apt-get install -y --no-install-recommends \
-    fprintd \
-    libpam-fprintd \
-    libfprint-2-2
+apt-get install -y --no-install-recommends fprintd libpam-fprintd libfprint-2-2
 
 # 2. Setup udev rule for device access
 echo "[*] Installing udev rule for FocalTech fingerprint sensor..."
@@ -50,19 +46,24 @@ if ! id -nG "$TARGET_USER" | grep -qw "plugdev"; then
     usermod -a -G plugdev "$TARGET_USER"
 fi
 
-# 3. Install patched libfprint with 2808:c6d5 support
-SYSTEM_LIB="/usr/lib/x86_64-linux-gnu/libfprint-2.so.2.0.0"
+# 3. Install verified patched libfprint with 2808:c6d5 support and fix symlinks
+LIB_DIR="/usr/lib/x86_64-linux-gnu"
+ALT_LIB_DIR="/lib/x86_64-linux-gnu"
 
-if [ -f "$SCRIPT_DIR/libfprint-2.so.2.0.0" ]; then
-    echo "[*] Installing verified patched libfprint-2.so.2.0.0 (FocalTech 2808:c6d5 support)..."
-    if [ -f "$SYSTEM_LIB" ] && [ ! -f "${SYSTEM_LIB}.bak" ]; then
-        cp "$SYSTEM_LIB" "${SYSTEM_LIB}.bak"
-    fi
-    cp "$SCRIPT_DIR/libfprint-2.so.2.0.0" "$SYSTEM_LIB"
-    chmod 644 "$SYSTEM_LIB"
-    ldconfig
-    echo "[+] Successfully installed patched libfprint to $SYSTEM_LIB"
+echo "[*] Removing poisoned .bak libraries and pointing symlinks to patched driver..."
+rm -f "$LIB_DIR/libfprint-2.so.2.0.0.bak" "$ALT_LIB_DIR/libfprint-2.so.2.0.0.bak" 2>/dev/null || true
+
+cp -f "$SCRIPT_DIR/libfprint-2.so.2.0.0" "$LIB_DIR/libfprint-2.so.2.0.0"
+chmod 644 "$LIB_DIR/libfprint-2.so.2.0.0"
+
+# Point soname symlinks directly to the patched 2.0.0 binary
+ln -sf libfprint-2.so.2.0.0 "$LIB_DIR/libfprint-2.so.2"
+if [ -d "$ALT_LIB_DIR" ]; then
+    ln -sf libfprint-2.so.2.0.0 "$ALT_LIB_DIR/libfprint-2.so.2"
 fi
+
+ldconfig
+echo "[+] Successfully installed patched libfprint to $LIB_DIR/libfprint-2.so.2"
 
 # 4. Configure PAM for Hyprlock / Quickshell
 echo "[*] Configuring PAM authentication in /etc/pam.d/hyprlock..."
@@ -73,20 +74,19 @@ auth    sufficient      pam_fprintd.so max_tries=1 timeout=10
 EOF
 
 # 5. Restart fprintd daemon
-echo "[*] Killing old fprintd instances and restarting service..."
+echo "[*] Terminating any stale fprintd processes and restarting service..."
 pkill -9 -f fprintd 2>/dev/null || true
 systemctl restart fprintd 2>/dev/null || true
 
-# Wait 1.5 seconds for fprintd to settle on DBus
+# Wait for fprintd to initialize on DBus
 sleep 1.5
 
 echo "======================================================================="
 echo "[+] Fingerprint driver and PAM integration successfully configured!"
 echo "    Device: FocalTech Fingerprint Device (2808:c6d5)"
 echo ""
-echo "[*] Available devices:"
+echo "[*] Available devices detected by fprintd:"
 fprintd-list "$TARGET_USER" || true
-echo ""
 echo "======================================================================="
 echo "    To enroll your fingerprint now, run:"
 echo "        fprintd-enroll"
