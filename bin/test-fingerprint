@@ -188,17 +188,25 @@ class FingerprintTester:
         self.rearm_timer = None
         if not self.claimed or not self.device:
             return False
-        try:
-            self.device.VerifyStart("any")
-            self.is_scanning = True
-            print(f"\r{BOLD}{CYAN}[•]{RESET} {BOLD}Ready! Touch the fingerprint sensor now...{RESET}       ", end="", flush=True)
-            return False
-        except dbus.DBusException as e:
-            if "AlreadyInUse" in str(e):
-                self.rearm_timer = GLib.timeout_add(100, self._do_rearm)
-            return False
-        except Exception:
-            return False
+        for attempt in range(8):
+            try:
+                self.device.VerifyStart("any")
+                self.is_scanning = True
+                print(f"\n{BOLD}{CYAN}[•]{RESET} {BOLD}Ready! Touch the fingerprint sensor with your enrolled finger...{RESET}\n", flush=True)
+                return False
+            except dbus.DBusException as e:
+                err_str = str(e)
+                if "AlreadyInUse" in err_str:
+                    time.sleep(0.08)
+                    continue
+                print(f"\n{RED}[-] VerifyStart error: {e}{RESET}\n")
+                return False
+            except Exception as e:
+                print(f"\n{RED}[-] VerifyStart exception: {e}{RESET}\n")
+                return False
+        # If still busy after immediate retries, try again shortly
+        self.rearm_timer = GLib.timeout_add(150, self._do_rearm)
+        return False
 
     def _on_finger_selected(self, finger):
         pass
@@ -211,31 +219,23 @@ class FingerprintTester:
         if result == "verify-match":
             print(f"\r{BOLD}{GREEN}[✓] MATCH SUCCESS! Fingerprint verified successfully!{RESET}      \n")
             print(f"    {DIM}Sensor hardware, driver, and stored template are 100% matched.{RESET}\n")
-            self._schedule_rearm(500)
+            self._schedule_rearm(600)
         elif result == "verify-no-match":
             print(f"\r{BOLD}{RED}[✗] NO MATCH! Sensor minutiae did not match template.{RESET}       ")
-            try:
-                if os.path.exists("/tmp/focaltech_debug.log"):
-                    with open("/tmp/focaltech_debug.log", "r") as f:
-                        lines = f.readlines()
-                        if lines:
-                            print(f"    {DIM}Driver log: {lines[-1].strip()}{RESET}")
-            except Exception:
-                pass
-            print(f"    {YELLOW}Tip: Press flat across the center and hold steady.{RESET}")
-            self._schedule_rearm(200)
+            print(f"    {YELLOW}Action: Lift your finger and try again with your authentic enrolled finger.{RESET}")
+            self._schedule_rearm(350)
         elif result == "verify-swipe-too-short":
             print(f"\r{YELLOW}[!] Hold finger longer on the sensor...{RESET}                     ")
-            self._schedule_rearm(200)
+            self._schedule_rearm(250)
         elif result == "verify-finger-not-centered":
             print(f"\r{YELLOW}[!] Center your finger directly on the sensor pad...{RESET}       ")
-            self._schedule_rearm(200)
+            self._schedule_rearm(250)
         elif result in ("verify-retry-scan", "verify-remove-and-retry"):
             print(f"\r{YELLOW}[!] Please lift and press down again...{RESET}                     ")
-            self._schedule_rearm(200)
+            self._schedule_rearm(250)
         else:
             if done:
-                self._schedule_rearm(200)
+                self._schedule_rearm(250)
 
     # ── Interactive Enrollment Mode ──
     def run_enrollment(self):

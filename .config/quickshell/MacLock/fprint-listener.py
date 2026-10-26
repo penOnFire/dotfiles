@@ -85,31 +85,36 @@ def do_rearm():
     rearm_timer = None
     if not claimed or not device:
         return False
-    try:
-        device.VerifyStart("any", dbus_interface="net.reactivated.Fprint.Device")
-        log("VerifyStart successfully re-armed")
-        emit("ready_waiting")
-        return False
-    except dbus.DBusException as e:
-        name = e.get_dbus_name()
-        log(f"rearm DBusException: {name} - {e}")
-        if "AlreadyInUse" in name or "AlreadyInUse" in str(e):
-            # Verification already active and listening
+    for attempt in range(8):
+        try:
+            device.VerifyStart("any", dbus_interface="net.reactivated.Fprint.Device")
+            log(f"VerifyStart successfully re-armed on attempt {attempt}")
             emit("ready_waiting")
             return False
-        elif "ClaimDevice" in name:
-            try:
-                username = pwd.getpwuid(os.getuid()).pw_name
-                device.Claim(username, dbus_interface="net.reactivated.Fprint.Device")
-                device.VerifyStart("any", dbus_interface="net.reactivated.Fprint.Device")
-                log("Re-claimed and re-armed VerifyStart")
-                emit("ready_waiting")
-            except Exception as e2:
-                log(f"Re-claim failed: {e2}")
-        return False
-    except Exception as e:
-        log(f"rearm generic exception: {e}")
-        return False
+        except dbus.DBusException as e:
+            name = e.get_dbus_name()
+            err_str = str(e)
+            log(f"rearm DBusException (attempt {attempt}): {name} - {err_str}")
+            if "AlreadyInUse" in name or "AlreadyInUse" in err_str:
+                time.sleep(0.08)
+                continue
+            elif "ClaimDevice" in name:
+                try:
+                    username = pwd.getpwuid(os.getuid()).pw_name
+                    device.Claim(username, dbus_interface="net.reactivated.Fprint.Device")
+                    device.VerifyStart("any", dbus_interface="net.reactivated.Fprint.Device")
+                    log("Re-claimed and re-armed VerifyStart")
+                    emit("ready_waiting")
+                    return False
+                except Exception as e2:
+                    log(f"Re-claim failed: {e2}")
+            return False
+        except Exception as e:
+            log(f"rearm generic exception: {e}")
+            return False
+    # If still busy after 8 immediate retries, try again in 150ms
+    rearm_timer = GLib.timeout_add(150, do_rearm)
+    return False
 
 def on_verify_status(result, done):
     log(f"on_verify_status: result={result}, done={done}")
@@ -119,15 +124,15 @@ def on_verify_status(result, done):
     elif result == "verify-no-match":
         emit("no-match")
         if done:
-            schedule_rearm(200)
+            schedule_rearm(350)
     elif result in ("verify-swipe-too-short", "verify-finger-not-centered", "verify-remove-and-retry", "verify-retry-scan"):
         emit("retry", reason=result)
         if done:
-            schedule_rearm(200)
+            schedule_rearm(250)
     else:
         emit("status", result=result)
         if done:
-            schedule_rearm(200)
+            schedule_rearm(250)
 
 def on_verify_finger_selected(finger_name):
     log(f"on_verify_finger_selected: {finger_name}")

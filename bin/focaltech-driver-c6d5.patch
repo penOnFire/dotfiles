@@ -11,7 +11,7 @@
 +  gboolean        verify_has_template;
  };
 --- /tmp/focaltech_repo/driver/focaltech.c	2026-10-26 16:01:11.222943568 +0800
-+++ /tmp/libfprint-1.94.9/libfprint/drivers/focaltech.c	2026-10-26 19:12:54.009792132 +0800
++++ /tmp/libfprint-1.94.9/libfprint/drivers/focaltech.c	2026-10-26 19:24:55.901681233 +0800
 @@ -1,6 +1,6 @@
  /*
 - * Focaltech 2808:9e65 driver for libfprint
@@ -106,12 +106,16 @@
  
  /* ============= USB Transfer Callbacks ============= */
  
-@@ -86,10 +88,11 @@
+@@ -86,10 +88,15 @@
           gpointer user_data, GError *error)
  {
    FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
 -  
 +  FpiSsm *ssm = transfer->ssm;
++
++  /* If task SSM is already finished or cancelled, drop transfer safely */
++  if (!ssm || ssm != self->task_ssm)
++    return;
 +
    if (error)
      {
@@ -120,7 +124,7 @@
        return;
      }
  
-@@ -98,11 +101,11 @@
+@@ -98,11 +105,11 @@
      {
        if (!verify_checksum (transfer->buffer, transfer->actual_length))
          {
@@ -135,7 +139,7 @@
        /* Copy received data to our buffer for later processing */
        self->recv_len = MIN (transfer->actual_length, sizeof (self->recv_buffer));
        memcpy (self->recv_buffer, transfer->buffer, self->recv_len);
-@@ -112,186 +115,94 @@
+@@ -112,8 +119,7 @@
        self->recv_len = 0;
      }
  
@@ -145,20 +149,26 @@
  }
  
  static void
- send_cb (FpiUsbTransfer *transfer, FpDevice *device,
+@@ -121,177 +127,93 @@
           gpointer user_data, GError *error)
  {
--  FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
+   FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
 -  
++  FpiSsm *ssm = transfer->ssm;
++
++  /* If task SSM is already finished or cancelled, drop transfer safely */
++  if (!ssm || ssm != self->task_ssm)
++    return;
++
    if (error)
      {
 -      fpi_ssm_mark_failed (self->task_ssm, error);
-+      fpi_ssm_mark_failed (transfer->ssm, error);
++      fpi_ssm_mark_failed (ssm, error);
        return;
      }
  
 -  fpi_ssm_next_state (self->task_ssm);
-+  fpi_ssm_next_state (transfer->ssm);
++  fpi_ssm_next_state (ssm);
  }
  
  /* ============= Command Transactions ============= */
@@ -181,7 +191,7 @@
 +
    fpi_usb_transfer_submit (transfer, FOCALTECH_CMD_TIMEOUT,
 -                          NULL, callback, NULL);
-+                           NULL, callback, NULL);
++                           fpi_device_get_cancellable (device), callback, NULL);
  }
  
  static void
@@ -197,7 +207,7 @@
 -  fpi_usb_transfer_submit (transfer, FOCALTECH_CMD_TIMEOUT,
 -                          NULL, callback, NULL);
 -}
- 
+-
 -/* ============= Device Open State Machine ============= */
 -
 -enum open_states {
@@ -207,7 +217,7 @@
 -  OPEN_INIT_RECV,
 -  OPEN_NUM_STATES,
 -};
--
+ 
 -static void
 -open_run_state (FpiSsm *ssm, FpDevice *device)
 -{
@@ -237,7 +247,7 @@
 -      break;
 -    }
 +  fpi_usb_transfer_submit (transfer, FOCALTECH_CMD_TIMEOUT,
-+                           NULL, callback, NULL);
++                           fpi_device_get_cancellable (device), callback, NULL);
  }
  
 -static void
@@ -281,7 +291,7 @@
 -}
 -
 -/* ============= Device Close State Machine ============= */
- 
+-
 -enum close_states {
 -  CLOSE_RESET_SEND,
 -  CLOSE_RESET_RECV,
@@ -316,7 +326,7 @@
 -  self->is_active = FALSE;
 -
 -  g_usb_device_release_interface (fpi_device_get_usb_device (device), 0, 0, &release_error);
--
+ 
 -  fpi_device_close_complete (device, error ? error : release_error);
 +  self->is_active = TRUE;
 +  fpi_device_open_complete (device, NULL);
@@ -345,7 +355,7 @@
    ENROLL_CHECK_STATUS_SEND,
    ENROLL_CHECK_STATUS_RECV,
    ENROLL_CHECK_SECURE_SEND,
-@@ -314,21 +225,8 @@
+@@ -314,21 +236,8 @@
    ENROLL_FINALIZE_SECURE_RECV,
    ENROLL_FINALIZE_SEND,
    ENROLL_FINALIZE_RECV,
@@ -369,7 +379,7 @@
    ENROLL_NUM_STATES,
  };
  
-@@ -336,220 +234,156 @@
+@@ -336,220 +245,156 @@
  enroll_run_state (FpiSsm *ssm, FpDevice *device)
  {
    FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
@@ -653,7 +663,7 @@
        break;
      }
  }
-@@ -559,28 +393,28 @@
+@@ -559,28 +404,28 @@
  {
    FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
    FpPrint *print = NULL;
@@ -689,7 +699,7 @@
    fpi_device_enroll_complete (device, g_object_ref (print), NULL);
  }
  
-@@ -588,9 +422,13 @@
+@@ -588,9 +433,13 @@
  focaltech_enroll (FpDevice *device)
  {
    FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
@@ -705,7 +715,7 @@
    self->task_ssm = fpi_ssm_new (device, enroll_run_state, ENROLL_NUM_STATES);
    fpi_ssm_start (self->task_ssm, enroll_complete);
  }
-@@ -602,8 +440,6 @@
+@@ -602,8 +451,6 @@
    VERIFY_WAKE_RECV,
    VERIFY_INIT_SEND,
    VERIFY_INIT_RECV,
@@ -714,7 +724,7 @@
    VERIFY_POLL_SEND,
    VERIFY_POLL_RECV,
    VERIFY_POLL_CHECK,
-@@ -617,6 +453,9 @@
+@@ -617,6 +464,9 @@
    VERIFY_SECURE_RECV,
    VERIFY_MATCH_SEND,
    VERIFY_MATCH_RECV,
@@ -724,7 +734,7 @@
    VERIFY_NUM_STATES,
  };
  
-@@ -625,7 +464,7 @@
+@@ -625,7 +475,7 @@
  {
    FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
    guint8 args[3];
@@ -733,7 +743,7 @@
    switch (fpi_ssm_get_cur_state (ssm))
      {
      case VERIFY_WAKE_SEND:
-@@ -633,136 +472,110 @@
+@@ -633,136 +483,110 @@
        args[1] = 0x02;
        send_command (device, CMD_POWER, args, 2, send_cb);
        break;
@@ -916,7 +926,7 @@
      }
  }
  
-@@ -771,27 +584,65 @@
+@@ -771,27 +595,65 @@
  {
    FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
    gboolean match = FALSE;
@@ -956,7 +966,7 @@
 +        g_object_get (verify_print, "fpi-data", &data, NULL);
 +
 +      if (data)
-         {
++        {
 +          if (g_variant_is_of_type (data, G_VARIANT_TYPE ("(ay)")))
 +            {
 +              g_variant_get (data, "(@ay)", &template_var);
@@ -978,7 +988,7 @@
 +            fp_warn ("Hardware returned RESP_OK but template key did not match stored print");
 +        }
 +      else if (self->verify_response_code == RESP_OK && !stored_template)
-+        {
+         {
 +          /* If no stored template was bound to print, accept hardware MOC match */
            match = TRUE;
          }
@@ -993,7 +1003,7 @@
    if (match)
      {
        fpi_device_verify_report (device, FPI_MATCH_SUCCESS, NULL, NULL);
-@@ -808,52 +659,41 @@
+@@ -808,52 +670,53 @@
  focaltech_verify (FpDevice *device)
  {
    FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
@@ -1044,30 +1054,43 @@
 +
    if (self->task_ssm)
      {
+-      fpi_ssm_mark_failed (self->task_ssm,
+-                          g_error_new_literal (G_IO_ERROR,
+-                                              G_IO_ERROR_CANCELLED,
+-                                              "Operation was cancelled"));
 +      int state = fpi_ssm_get_cur_state (self->task_ssm);
 +
++      /* If the SSM is sleeping in a timer between polls, cancel the timer and fail cleanly.
++       * If a USB transfer is active, fpi_device_get_cancellable() already cancelled it,
++       * and recv_cb/send_cb will invoke fpi_ssm_mark_failed safely. */
 +      if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_ENROLL)
 +        {
 +          if (state == ENROLL_POLL_CHECK || state == ENROLL_CHECK_COMPLETE)
-+            fpi_ssm_cancel_delayed_state_change (self->task_ssm);
++            {
++              fpi_ssm_cancel_delayed_state_change (self->task_ssm);
++              fpi_ssm_mark_failed (self->task_ssm,
++                                   g_error_new_literal (G_IO_ERROR,
++                                                       G_IO_ERROR_CANCELLED,
++                                                       "Operation was cancelled"));
++              self->task_ssm = NULL;
++            }
 +        }
 +      else if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_VERIFY)
 +        {
 +          if (state == VERIFY_POLL_CHECK)
-+            fpi_ssm_cancel_delayed_state_change (self->task_ssm);
++            {
++              fpi_ssm_cancel_delayed_state_change (self->task_ssm);
++              fpi_ssm_mark_failed (self->task_ssm,
++                                   g_error_new_literal (G_IO_ERROR,
++                                                       G_IO_ERROR_CANCELLED,
++                                                       "Operation was cancelled"));
++              self->task_ssm = NULL;
++            }
 +        }
-+
-       fpi_ssm_mark_failed (self->task_ssm,
--                          g_error_new_literal (G_IO_ERROR,
--                                              G_IO_ERROR_CANCELLED,
--                                              "Operation was cancelled"));
-+                           g_error_new_literal (G_IO_ERROR,
-+                                               G_IO_ERROR_CANCELLED,
-+                                               "Operation was cancelled"));
      }
  }
  
-@@ -869,20 +709,20 @@
+@@ -869,20 +732,20 @@
  fpi_device_focaltech_class_init (FpiDeviceFocaltechClass *klass)
  {
    FpDeviceClass *dev_class = FP_DEVICE_CLASS (klass);
