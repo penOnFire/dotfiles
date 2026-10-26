@@ -335,7 +335,6 @@ class FingerprintTester:
             print(f"\n{BOLD}{GREEN}🎉 ENROLLMENT COMPLETED SUCCESSFULLY!{RESET}")
             print(f"   Your fingerprint template is saved and active for Touch ID.\n")
             self.cleanup()
-            sys.exit(0)
         elif result == "enroll-retry-scan":
             print(f"{YELLOW}[!] Lift finger and try pressing firmly again...{RESET}", flush=True)
         elif result == "enroll-swipe-too-short":
