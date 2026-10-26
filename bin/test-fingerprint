@@ -204,6 +204,14 @@ class FingerprintTester:
             self._schedule_rearm(500)
         elif result == "verify-no-match":
             print(f"\r{BOLD}{RED}[✗] NO MATCH! Sensor minutiae did not match template.{RESET}       ")
+            try:
+                if os.path.exists("/tmp/focaltech_debug.log"):
+                    with open("/tmp/focaltech_debug.log", "r") as f:
+                        lines = f.readlines()
+                        if lines:
+                            print(f"    {DIM}Driver log: {lines[-1].strip()}{RESET}")
+            except Exception:
+                pass
             print(f"    {YELLOW}Tip: Press flat across the center and hold steady.{RESET}")
             self._schedule_rearm(200)
         elif result == "verify-swipe-too-short":
@@ -261,7 +269,7 @@ class FingerprintTester:
         elif result == "enroll-completed":
             print(f"\n{BOLD}{GREEN}🎉 ENROLLMENT COMPLETED SUCCESSFULLY!{RESET}")
             print(f"   Your fingerprint template is saved and active for Touch ID.\n")
-            self.cleanup()
+            GLib.idle_add(self.cleanup)
         elif result == "enroll-retry-scan":
             print(f"{YELLOW}[!] Lift finger and try pressing firmly again...{RESET}", flush=True)
         elif result == "enroll-swipe-too-short":
