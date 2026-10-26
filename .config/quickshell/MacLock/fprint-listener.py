@@ -96,9 +96,13 @@ def do_rearm():
             err_str = str(e)
             log(f"rearm DBusException (attempt {attempt}): {name} - {err_str}")
             if "AlreadyInUse" in name or "AlreadyInUse" in err_str:
+                try:
+                    device.VerifyStop(dbus_interface="net.reactivated.Fprint.Device")
+                except Exception:
+                    pass
                 time.sleep(0.08)
                 continue
-            elif "ClaimDevice" in name:
+            elif "ClaimDevice" in name or "ClaimDevice" in err_str:
                 try:
                     username = pwd.getpwuid(os.getuid()).pw_name
                     device.Claim(username, dbus_interface="net.reactivated.Fprint.Device")
@@ -123,15 +127,27 @@ def on_verify_status(result, done):
         cleanup()
     elif result == "verify-no-match":
         emit("no-match")
+        try:
+            device.VerifyStop(dbus_interface="net.reactivated.Fprint.Device")
+        except Exception:
+            pass
         if done:
-            schedule_rearm(350)
+            schedule_rearm(300)
     elif result in ("verify-swipe-too-short", "verify-finger-not-centered", "verify-remove-and-retry", "verify-retry-scan"):
         emit("retry", reason=result)
+        try:
+            device.VerifyStop(dbus_interface="net.reactivated.Fprint.Device")
+        except Exception:
+            pass
         if done:
             schedule_rearm(250)
     else:
         emit("status", result=result)
         if done:
+            try:
+                device.VerifyStop(dbus_interface="net.reactivated.Fprint.Device")
+            except Exception:
+                pass
             schedule_rearm(250)
 
 def on_verify_finger_selected(finger_name):
