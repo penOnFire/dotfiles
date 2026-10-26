@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # setup-fingerprint.sh - Automated setup for FocalTech Fingerprint Sensor (2808:c6d5)
-# Configures fprintd, installs patched libfprint, sets udev rules, and updates PAM.
+# Configures fprintd, installs patched libfprint, sets udev & polkit rules, and updates PAM.
 # ==============================================================================
 set -euo pipefail
 
@@ -46,7 +46,24 @@ if ! id -nG "$TARGET_USER" | grep -qw "plugdev"; then
     usermod -a -G plugdev "$TARGET_USER"
 fi
 
-# 3. Install verified patched libfprint with 2808:c6d5 support and fix symlinks
+# 3. Setup Polkit rule to allow enrollment without external GUI agent
+echo "[*] Installing Polkit rule for fingerprint enrollment and verification..."
+mkdir -p /etc/polkit-1/rules.d
+cat << 'EOF' > /etc/polkit-1/rules.d/50-fprintd.rules
+/* Allow users in plugdev or sudo group to enroll/verify fingerprints without GUI prompt */
+polkit.addRule(function(action, subject) {
+    if ((action.id == "net.reactivated.fprint.device.enroll" ||
+         action.id == "net.reactivated.fprint.device.verify" ||
+         action.id == "net.reactivated.fprint.device.setusername") &&
+        (subject.isInGroup("plugdev") || subject.isInGroup("sudo"))) {
+        return polkit.Result.YES;
+    }
+});
+EOF
+
+systemctl restart polkit 2>/dev/null || true
+
+# 4. Install verified patched libfprint with 2808:c6d5 support and fix symlinks
 LIB_DIR="/usr/lib/x86_64-linux-gnu"
 ALT_LIB_DIR="/lib/x86_64-linux-gnu"
 
@@ -65,7 +82,7 @@ fi
 ldconfig
 echo "[+] Successfully installed patched libfprint to $LIB_DIR/libfprint-2.so.2"
 
-# 4. Configure PAM for Hyprlock / Quickshell
+# 5. Configure PAM for Hyprlock / Quickshell
 echo "[*] Configuring PAM authentication in /etc/pam.d/hyprlock..."
 cat << 'EOF' > /etc/pam.d/hyprlock
 # PAM configuration for Hyprlock / MacLock with fingerprint support
@@ -73,7 +90,7 @@ auth    sufficient      pam_fprintd.so max_tries=1 timeout=10
 @include common-auth
 EOF
 
-# 5. Restart fprintd daemon
+# 6. Restart fprintd daemon
 echo "[*] Terminating any stale fprintd processes and restarting service..."
 pkill -9 -f fprintd 2>/dev/null || true
 systemctl restart fprintd 2>/dev/null || true
