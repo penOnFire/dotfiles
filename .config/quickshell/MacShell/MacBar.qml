@@ -935,6 +935,12 @@ Scope {
             } else if (k === "lock") {
                 rrect(3.6, 8, 10.8, 7.8, 2); ctx.stroke();
                 ctx.beginPath(); ctx.moveTo(6, 8); ctx.lineTo(6, 6); ctx.arc(9, 6, 3, PI, 0, false); ctx.lineTo(12, 8); ctx.stroke();
+            } else if (k === "touchid") {
+                ctx.lineWidth = 1.35;
+                ctx.beginPath(); ctx.arc(9, 9.2, 1.8, -PI * 0.7, PI * 0.65); ctx.stroke();
+                ctx.beginPath(); ctx.arc(9, 9.0, 3.8, -PI * 0.85, PI * 0.8); ctx.stroke();
+                ctx.beginPath(); ctx.arc(9, 8.8, 5.8, -PI * 0.9, PI * 0.82); ctx.stroke();
+                ctx.beginPath(); ctx.arc(9, 8.6, 7.8, -PI * 0.75, PI * 0.5); ctx.stroke();
             } else if (k === "power") {
                 ctx.beginPath(); ctx.arc(9, 9.6, 6, -PI / 2 + 0.65, -PI / 2 - 0.65 + PI * 2, false); ctx.stroke();
                 line(9, 2.2, 9, 8.4);

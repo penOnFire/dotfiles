@@ -1636,7 +1636,7 @@ Item {
         Item {
             id: pwBox
             anchors.horizontalCenter: parent.horizontalCenter
-            width: (ls.st.pass.length > 0 || ls.st.engaged ? 236 : 210) * ls.u
+            width: (ls.st.pass.length > 0 || ls.st.engaged ? 236 : (ls.st.fingerprintActive ? 236 : 210)) * ls.u
             height: 36 * ls.u
             Behavior on width { NumberAnimation { duration: 450; easing.type: Easing.OutQuint } }
             // pressed: Liquid Glass "squish" (a bit wider, a bit flatter); it stays squished while you hold
@@ -1701,14 +1701,27 @@ Item {
                 glowColor: "white"
             }
 
-            Text {
-                anchors.left: parent.left; anchors.leftMargin: 16 * ls.u
+            Row {
+                anchors.left: parent.left; anchors.leftMargin: 14 * ls.u
                 anchors.verticalCenter: parent.verticalCenter
-                text: I18n.tr("Enter Password")
-                color: Qt.rgba(1, 1, 1, 0.62)
-                font.family: ls.fam; font.pixelSize: 14 * ls.u
+                spacing: 6 * ls.u
                 opacity: ls.st.pass.length === 0 ? 1 : 0
                 Behavior on opacity { NumberAnimation { duration: 140 } }
+                Glyph {
+                    visible: ls.st.fingerprintActive
+                    width: 14 * ls.u; height: 14 * ls.u
+                    kind: "touchid"
+                    color: ls.st.fingerprintMatching ? Qt.rgba(0.4, 0.9, 0.5, 0.95) : Qt.rgba(1, 1, 1, 0.65)
+                    anchors.verticalCenter: parent.verticalCenter
+                    scale: ls.st.fingerprintMatching ? 1.15 : 1.0
+                    Behavior on scale { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: ls.st.fingerprintActive ? I18n.tr("Touch ID or Enter Password") : I18n.tr("Enter Password")
+                    color: Qt.rgba(1, 1, 1, 0.62)
+                    font.family: ls.fam; font.pixelSize: 13.5 * ls.u
+                }
             }
 
             // password dots: one entry per character, so only the dot you just typed animates in (and only the one you
@@ -1844,10 +1857,10 @@ Item {
         MorphText {
             horizontalAlignment: Text.AlignHCenter
             anchors.horizontalCenter: parent.horizontalCenter
-            text: ls.st.message !== "" ? ls.st.message : I18n.tr("Enter your password to unlock")
+            text: ls.st.message !== "" ? ls.st.message : (ls.st.fingerprintActive ? I18n.tr("Touch ID or enter password to unlock") : I18n.tr("Enter your password to unlock"))
             color: ls.st.message !== "" ? Qt.rgba(1, 0.78, 0.76, 0.95) : Qt.rgba(1, 1, 1, 0.55)
             font.family: ls.fam; font.pixelSize: 12 * ls.u
-            opacity: ls.st.engaged || ls.st.message !== "" ? 1 : 0
+            opacity: ls.st.engaged || ls.st.fingerprintActive || ls.st.message !== "" ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: 300 } }
         }
     }

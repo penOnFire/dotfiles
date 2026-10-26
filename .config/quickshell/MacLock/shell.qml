@@ -66,6 +66,8 @@ ShellRoot {
         property string message: ""
         property bool engaged: false
         property bool unlocking: false
+        property bool fingerprintActive: false
+        property bool fingerprintMatching: false
         property string mediaSlot: "top"    // "top" (under the clock) | "bottom" (above the password field)
         property bool capsLock: false
         property bool use24h: true          // MacShell → Menu Bar → "24-hour clock"
@@ -159,6 +161,38 @@ ShellRoot {
         onError: err => {
             lockState.busy = false;
             lockState.fail("Authentication error");
+        }
+    }
+
+    // Biometric fingerprint listener: runs while screen is locked and waits for touch on sensor
+    Process {
+        id: fprintProc
+        running: (root.lockRequested || root.preview) && !lockState.unlocking
+        command: ["python3", Quickshell.env("HOME") + "/.config/quickshell/MacLock/fprint-listener.py"]
+        stdout: SplitParser {
+            onRead: data => {
+                var s = (data || "").trim();
+                if (!s) return;
+                try {
+                    var ev = JSON.parse(s);
+                    if (ev.status === "ready") {
+                        lockState.fingerprintActive = true;
+                    } else if (ev.status === "matched") {
+                        lockState.fingerprintMatching = false;
+                        lockState.unlock();
+                    } else if (ev.status === "no-match") {
+                        lockState.fingerprintMatching = false;
+                        lockState.fail("Touch ID failed. Try again or enter password.");
+                    } else if (ev.status === "touch" || ev.status === "finger-selected") {
+                        lockState.fingerprintMatching = true;
+                    } else if (ev.status === "retry") {
+                        lockState.fingerprintMatching = false;
+                        lockState.message = "Fingerprint not centered. Try again.";
+                    } else if (ev.status === "unavailable") {
+                        lockState.fingerprintActive = false;
+                    }
+                } catch (e) {}
+            }
         }
     }
 

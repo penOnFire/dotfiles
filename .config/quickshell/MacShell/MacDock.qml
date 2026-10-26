@@ -3345,6 +3345,18 @@ Scope {
                         SSwitch { t: pal; checked: root.bar ? root.bar.use24h : true; onToggled: v => { if (root.bar) root.bar.use24h = v; } }
                     }
                 }
+                SLabel { t: pal; header: true; text: I18n.tr("Touch ID") }
+                SCard {
+                    t: pal
+                    SRow {
+                        t: pal; title: I18n.tr("Use Touch ID to Unlock")
+                        subtitle: I18n.tr("FocalTech Biometric Sensor (2808:c6d5)")
+                        SButton {
+                            t: pal; text: I18n.tr("Enroll Finger…")
+                            onClicked: Quickshell.execDetached(["kitty", "-e", "sh", "-c", "fprintd-enroll 2>/dev/null || (echo 'fprintd is not installed or configured yet. Run ~/dotfiles/bin/setup-fingerprint.sh first.'; read -p 'Press Enter...')"])
+                        }
+                    }
+                }
                 // ── Clock ──
                 // the clock fonts, loaded straight from their files so the previews never fall back to another face
                 FontLoader { id: fNunito; source: "file://" + Quickshell.env("HOME") + "/.local/share/fonts/Nunito/Nunito.ttf" }
