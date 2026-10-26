@@ -171,27 +171,37 @@ ShellRoot {
         command: ["python3", Quickshell.env("HOME") + "/.config/quickshell/MacLock/fprint-listener.py"]
         stdout: SplitParser {
             onRead: data => {
-                var s = (data || "").trim();
-                if (!s) return;
-                try {
-                    var ev = JSON.parse(s);
-                    if (ev.status === "ready") {
-                        lockState.fingerprintActive = true;
-                    } else if (ev.status === "matched") {
-                        lockState.fingerprintMatching = false;
-                        lockState.unlock();
-                    } else if (ev.status === "no-match") {
-                        lockState.fingerprintMatching = false;
-                        lockState.fail("Touch ID failed. Try again or enter password.");
-                    } else if (ev.status === "touch" || ev.status === "finger-selected") {
-                        lockState.fingerprintMatching = true;
-                    } else if (ev.status === "retry") {
-                        lockState.fingerprintMatching = false;
-                        lockState.message = "Fingerprint not centered. Try again.";
-                    } else if (ev.status === "unavailable") {
-                        lockState.fingerprintActive = false;
-                    }
-                } catch (e) {}
+                var lines = (data || "").split("\n");
+                for (var i = 0; i < lines.length; i++) {
+                    var s = lines[i].trim();
+                    if (!s) continue;
+                    try {
+                        var ev = JSON.parse(s);
+                        if (ev.status === "ready" || ev.status === "ready_waiting") {
+                            lockState.fingerprintActive = true;
+                            lockState.fingerprintMatching = false;
+                        } else if (ev.status === "matched") {
+                            lockState.fingerprintMatching = false;
+                            lockState.unlock();
+                        } else if (ev.status === "no-match") {
+                            lockState.fingerprintMatching = false;
+                            lockState.fail(I18n.tr("Touch ID failed. Try again or enter password."));
+                        } else if (ev.status === "touch") {
+                            lockState.fingerprintMatching = true;
+                        } else if (ev.status === "retry") {
+                            lockState.fingerprintMatching = false;
+                            if (ev.reason === "verify-finger-not-centered") {
+                                lockState.message = I18n.tr("Fingerprint not centered. Try again.");
+                            } else if (ev.reason === "verify-swipe-too-short") {
+                                lockState.message = I18n.tr("Touch longer. Try again.");
+                            } else {
+                                lockState.message = I18n.tr("Try again.");
+                            }
+                        } else if (ev.status === "unavailable") {
+                            lockState.fingerprintActive = false;
+                        }
+                    } catch (e) {}
+                }
             }
         }
     }

@@ -8,66 +8,141 @@ import sys
 import os
 import signal
 import json
-import time
 import pwd
+import time
+
+LOG_FILE = "/tmp/fprint-listener.log"
+
+def log(msg):
+    try:
+        with open(LOG_FILE, "a") as f:
+            f.write(f"[{time.strftime('%X')}] {msg}\n")
+    except Exception:
+        pass
+
+log("Starting fprint-listener.py...")
 
 try:
     import dbus
     import dbus.mainloop.glib
     from gi.repository import GLib
 except ImportError as e:
-    sys.stdout.write(json.dumps({"status": "unavailable", "reason": str(e)}) + "\n")
+    err = json.dumps({"status": "unavailable", "reason": str(e)})
+    sys.stdout.write(err + "\n")
     sys.stdout.flush()
+    log(f"ImportError: {err}")
     sys.exit(0)
 
 loop = None
+bus = None
 device = None
 claimed = False
+rearm_timer = None
 
 def emit(event, **kwargs):
     payload = {"status": event}
     payload.update(kwargs)
-    sys.stdout.write(json.dumps(payload) + "\n")
+    line = json.dumps(payload)
+    sys.stdout.write(line + "\n")
     sys.stdout.flush()
+    log(f"EMIT: {line}")
 
 def cleanup(*args):
-    global loop, device, claimed
+    global loop, device, claimed, rearm_timer
+    log("Cleanup called")
+    if rearm_timer:
+        try:
+            GLib.source_remove(rearm_timer)
+        except Exception:
+            pass
+        rearm_timer = None
+
     if device and claimed:
         try:
             device.VerifyStop(dbus_interface="net.reactivated.Fprint.Device")
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"VerifyStop exception: {e}")
         try:
             device.Release(dbus_interface="net.reactivated.Fprint.Device")
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"Release exception: {e}")
         claimed = False
     if loop and loop.is_running():
         loop.quit()
     sys.exit(0)
 
+def schedule_rearm(delay_ms=150):
+    global rearm_timer
+    if rearm_timer:
+        try:
+            GLib.source_remove(rearm_timer)
+        except Exception:
+            pass
+    rearm_timer = GLib.timeout_add(delay_ms, do_rearm)
+    log(f"Scheduled rearm in {delay_ms}ms")
+
+def do_rearm():
+    global rearm_timer, device, claimed
+    rearm_timer = None
+    if not claimed or not device:
+        return False
+    try:
+        device.VerifyStart("any", dbus_interface="net.reactivated.Fprint.Device")
+        log("VerifyStart successfully re-armed")
+        emit("ready_waiting")
+        return False
+    except dbus.DBusException as e:
+        name = e.get_dbus_name()
+        log(f"rearm DBusException: {name} - {e}")
+        if "AlreadyInUse" in name or "AlreadyInUse" in str(e):
+            # Previous verify session still finalizing in fprintd; retry after short interval
+            rearm_timer = GLib.timeout_add(120, do_rearm)
+        elif "ClaimDevice" in name:
+            try:
+                username = pwd.getpwuid(os.getuid()).pw_name
+                device.Claim(username, dbus_interface="net.reactivated.Fprint.Device")
+                device.VerifyStart("any", dbus_interface="net.reactivated.Fprint.Device")
+                log("Re-claimed and re-armed VerifyStart")
+                emit("ready_waiting")
+            except Exception as e2:
+                log(f"Re-claim failed: {e2}")
+        return False
+    except Exception as e:
+        log(f"rearm generic exception: {e}")
+        return False
+
 def on_verify_status(result, done):
+    log(f"on_verify_status: result={result}, done={done}")
     if result == "verify-match":
         emit("matched")
         cleanup()
     elif result == "verify-no-match":
         emit("no-match")
-        # Restart verification so user can try again
-        if not done and device:
-            try:
-                device.VerifyStart("any", dbus_interface="net.reactivated.Fprint.Device")
-            except Exception:
-                pass
-    elif result in ("verify-swipe-too-short", "verify-finger-not-centered", "verify-remove-and-retry"):
+        schedule_rearm(150)
+    elif result in ("verify-swipe-too-short", "verify-finger-not-centered", "verify-remove-and-retry", "verify-retry-scan"):
         emit("retry", reason=result)
+        if done:
+            schedule_rearm(150)
     else:
         emit("status", result=result)
+        if done:
+            schedule_rearm(150)
 
 def on_verify_finger_selected(finger_name):
+    log(f"on_verify_finger_selected: {finger_name}")
     emit("finger-selected", finger=finger_name)
 
+def on_properties_changed(interface, changed, invalidated):
+    if interface != "net.reactivated.Fprint.Device":
+        return
+    if "finger-present" in changed:
+        present = bool(changed["finger-present"])
+        log(f"finger-present: {present}")
+        if present:
+            emit("touch")
+
 def main():
-    global loop, device, claimed
+    global loop, bus, device, claimed
 
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
@@ -100,16 +175,30 @@ def main():
     try:
         dev_obj = bus.get_object("net.reactivated.Fprint", dev_path)
         device = dbus.Interface(dev_obj, "net.reactivated.Fprint.Device")
-        
-        username = pwd.getpwuid(os.getuid()).pw_name
-        device.Claim(username)
-        claimed = True
 
+        username = pwd.getpwuid(os.getuid()).pw_name
+
+        # Claim with retry in case previous locker just exited
+        claimed = False
+        for attempt in range(4):
+            try:
+                device.Claim(username)
+                claimed = True
+                break
+            except dbus.DBusException as ce:
+                if "AlreadyInUse" in ce.get_dbus_name() and attempt < 3:
+                    time.sleep(0.15)
+                    continue
+                raise
+
+        # Connect signals cleanly on dev_obj
         dev_obj.connect_to_signal("VerifyStatus", on_verify_status, dbus_interface="net.reactivated.Fprint.Device")
         dev_obj.connect_to_signal("VerifyFingerSelected", on_verify_finger_selected, dbus_interface="net.reactivated.Fprint.Device")
+        dev_obj.connect_to_signal("PropertiesChanged", on_properties_changed, dbus_interface="org.freedesktop.DBus.Properties")
 
         device.VerifyStart("any")
         emit("ready", device=str(dev_path), user=username)
+        log("VerifyStart succeeded and ready emitted")
     except dbus.DBusException as e:
         emit("unavailable", reason=f"Device claim/verify failed: {e.get_dbus_name()}")
         cleanup()
