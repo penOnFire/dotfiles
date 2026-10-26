@@ -6,6 +6,9 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+DEVICE_VENDOR_ID="2808"
+DEVICE_PRODUCT_ID="c6d5"
+DEVICE_ID="${DEVICE_VENDOR_ID}:${DEVICE_PRODUCT_ID}"
 
 if [ "$EUID" -ne 0 ]; then
     echo "[-] This script must be run with root privileges (sudo)." >&2
@@ -17,13 +20,26 @@ TARGET_USER="${SUDO_USER:-$USER}"
 TARGET_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
 
 echo "[*] Target user: $TARGET_USER ($TARGET_HOME)"
-echo "[*] Checking for FocalTech Fingerprint Device (2808:c6d5)..."
+echo "[*] Checking for FocalTech Fingerprint Device ($DEVICE_ID)..."
 
-if lsusb -d 2808:c6d5 >/dev/null 2>&1; then
-    echo "[+] Found FocalTech Fingerprint Device (ID 2808:c6d5)!"
-else
-    echo "[!] Warning: USB device 2808:c6d5 not detected via lsusb."
+# Read sysfs directly so detection does not depend on usbutils being installed.
+DEVICE_FOUND=0
+for usb_device in /sys/bus/usb/devices/*; do
+    if [[ -r "$usb_device/idVendor" && -r "$usb_device/idProduct" ]]; then
+        read -r usb_vendor < "$usb_device/idVendor"
+        read -r usb_product < "$usb_device/idProduct"
+        if [[ "$usb_vendor" == "$DEVICE_VENDOR_ID" && "$usb_product" == "$DEVICE_PRODUCT_ID" ]]; then
+            DEVICE_FOUND=1
+            break
+        fi
+    fi
+done
+
+if [ "$DEVICE_FOUND" -ne 1 ]; then
+    echo "[-] USB device $DEVICE_ID was not detected; refusing to install a device-specific driver." >&2
+    exit 1
 fi
+echo "[+] Found FocalTech Fingerprint Device (ID $DEVICE_ID)."
 
 # 1. Ensure fprintd and libpam-fprintd packages are installed
 echo "[*] Ensuring fprintd and libpam-fprintd packages are installed..."
@@ -91,19 +107,25 @@ auth    sufficient      pam_fprintd.so max_tries=1 timeout=10
 EOF
 
 # 6. Restart fprintd daemon
-echo "[*] Terminating any stale fprintd processes and restarting service..."
-pkill -9 -f fprintd 2>/dev/null || true
-systemctl restart fprintd 2>/dev/null || true
+echo "[*] Restarting fprintd service..."
+if ! systemctl restart fprintd; then
+    echo "[-] Could not restart fprintd. Service status follows:" >&2
+    systemctl status fprintd --no-pager >&2 || true
+    exit 1
+fi
 
 # Wait for fprintd to initialize on DBus
 sleep 1.5
 
+echo "[*] Available devices detected by fprintd:"
+if ! fprintd-list "$TARGET_USER"; then
+    echo "[-] fprintd is running, but device discovery failed for $TARGET_USER." >&2
+    echo "    Check the service log with: sudo journalctl -u fprintd -b --no-pager" >&2
+    exit 1
+fi
 echo "======================================================================="
 echo "[+] Fingerprint driver and PAM integration successfully configured!"
-echo "    Device: FocalTech Fingerprint Device (2808:c6d5)"
-echo ""
-echo "[*] Available devices detected by fprintd:"
-fprintd-list "$TARGET_USER" || true
+echo "    Device: FocalTech Fingerprint Device ($DEVICE_ID)"
 echo "======================================================================="
 echo "    To enroll your fingerprint now, run:"
 echo "        fprintd-enroll"

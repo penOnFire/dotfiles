@@ -1,0 +1,122 @@
+--- a/libfprint/drivers/focaltech.c
++++ b/libfprint/drivers/focaltech.c
+@@ -29,7 +29,6 @@
+ /* Device ID table */
+ static const FpIdEntry id_table[] = {
+   { .vid = 0x2808, .pid = 0x9e65 },
+-  { .vid = 0x2808, .pid = 0xc6d5 },
+   { .vid = 0,      .pid = 0 },
+ };
+ 
+@@ -95,10 +94,11 @@
+          gpointer user_data, GError *error)
+ {
+   FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
++  FpiSsm *ssm = transfer->ssm;
+   
+   if (error)
+     {
+-      fpi_ssm_mark_failed (self->task_ssm, error);
++      fpi_ssm_mark_failed (ssm, error);
+       return;
+     }
+ 
+@@ -107,7 +107,7 @@
+     {
+       if (!verify_checksum (transfer->buffer, transfer->actual_length))
+         {
+-          fpi_ssm_mark_failed (self->task_ssm,
++          fpi_ssm_mark_failed (ssm,
+                               fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
+           return;
+         }
+@@ -122,22 +122,20 @@
+     }
+ 
+   /* Store received data in transfer buffer for state handler to process */
+-  fpi_ssm_next_state (self->task_ssm);
++  fpi_ssm_next_state (ssm);
+ }
+ 
+ static void
+ send_cb (FpiUsbTransfer *transfer, FpDevice *device,
+          gpointer user_data, GError *error)
+ {
+-  FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
+-  
+   if (error)
+     {
+-      fpi_ssm_mark_failed (self->task_ssm, error);
++      fpi_ssm_mark_failed (transfer->ssm, error);
+       return;
+     }
+ 
+-  fpi_ssm_next_state (self->task_ssm);
++  fpi_ssm_next_state (transfer->ssm);
+ }
+ 
+ /* ============= Command Transactions ============= */
+@@ -338,6 +336,7 @@
+   ENROLL_FINAL_SECURE_RECV,
+   ENROLL_GET_TEMPLATE_SEND,
+   ENROLL_GET_TEMPLATE_RECV,
++  ENROLL_GET_TEMPLATE_PARSE,
+   ENROLL_NUM_STATES,
+ };
+ 
+@@ -537,15 +536,27 @@
+       
+     case ENROLL_GET_TEMPLATE_RECV:
+       receive_response (device, recv_cb);
+-      
++      break;
++
++    case ENROLL_GET_TEMPLATE_PARSE:
+       /* Extract the 32-byte template */
+       if (self->recv_len >= 36 && self->recv_buffer[3] == RESP_OK)
+         {
+           memcpy (self->enrolled_template, &self->recv_buffer[4], TEMPLATE_SIZE);
++          fpi_ssm_next_state (ssm);
+         }
+       else
+         {
+-          fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
++          guint8 declared_len = self->recv_len > 2 ? self->recv_buffer[2] : 0xff;
++          guint8 response_code = self->recv_len > 3 ? self->recv_buffer[3] : 0xff;
++
++          fpi_ssm_mark_failed (ssm,
++                               fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
++                                                         "Invalid enrolled-template response "
++                                                         "(length=%zu, declared=%u, status=0x%02x)",
++                                                         self->recv_len,
++                                                         declared_len,
++                                                         response_code));
+         }
+       break;
+     }
+@@ -869,6 +880,25 @@
+   /* Release any pending transfers by marking state machine as failed */
+   if (self->task_ssm)
+     {
++      int state = fpi_ssm_get_cur_state (self->task_ssm);
++
++      /* Poll and stage loops schedule delayed transitions. Cancel the timer
++       * before failing the SSM; completing a machine with a pending timeout
++       * violates the FpiSsm contract. */
++      if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_ENROLL)
++        {
++          if (state == ENROLL_POLL_CHECK ||
++              state == ENROLL_CHECK_COMPLETE ||
++              state == ENROLL_FINAL_POLL_CHECK)
++            fpi_ssm_cancel_delayed_state_change (self->task_ssm);
++        }
++      else if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_VERIFY ||
++               fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_IDENTIFY)
++        {
++          if (state == VERIFY_POLL_CHECK)
++            fpi_ssm_cancel_delayed_state_change (self->task_ssm);
++        }
++
+       fpi_ssm_mark_failed (self->task_ssm,
+                           g_error_new_literal (G_IO_ERROR,
+                                               G_IO_ERROR_CANCELLED,

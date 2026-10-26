@@ -1,0 +1,52 @@
+--- a/libfprint/drivers/focaltech_moc/focaltech_moc.c
++++ b/libfprint/drivers/focaltech_moc/focaltech_moc.c
+@@ -27,6 +27,7 @@ static const FpIdEntry id_table[] = {
+   { .vid = 0x2808,  .pid = 0xa57a,  },
+   { .vid = 0x2808,  .pid = 0xa78a,  },
++  { .vid = 0x2808,  .pid = 0xc6d5,  },
+   { .vid = 0,  .pid = 0,  .driver_data = 0 },   /* terminating entry */
+ };
+@@ -443,6 +444,9 @@ usb_claim_interface_probe (FpDevice *device, int claim, GError **error)
+   int i;
+ 
+   interfaces = g_usb_device_get_interfaces (fpi_device_get_usb_device (device), error);
++
++  if (interfaces == NULL)
++    return ret;
+ 
+   for (i = 0; i < interfaces->len; i++)
+     {
+@@ -507,8 +511,15 @@ task_ssm_init_done (FpiSsm *ssm, FpDevice *device, GError *error)
+   FpiDeviceFocaltechMoc *self = FPI_DEVICE_FOCALTECH_MOC (device);
+ 
+   if (error)
+-    usb_claim_interface_probe (device, 0, &error);
++    {
++      g_autoptr(GError) release_error = NULL;
++
++      if (usb_claim_interface_probe (device, 0, &release_error) != 0 && release_error)
++        fp_warn ("Failed to release interfaces after initialization error: %s",
++                 release_error->message);
++    }
+ 
+   fpi_device_open_complete (FP_DEVICE (self), g_steal_pointer (&error));
+@@ -555,8 +566,8 @@ focaltech_moc_get_enroll_times (FpiDeviceFocaltechMoc *self,
+   else
+     {
+-      fp_dbg ("focaltechmoc enroll_times: %d", enroll_times->enroll_times + 1);
+-      fpi_device_set_nr_enroll_stages (FP_DEVICE (self), enroll_times->enroll_times + 1);
++      fp_dbg ("focaltechmoc enroll_times: %d", enroll_times->enroll_times);
++      fpi_device_set_nr_enroll_stages (FP_DEVICE (self), enroll_times->enroll_times);
+       fpi_ssm_next_state (self->task_ssm);
+     }
+ }
+@@ -1335,7 +1346,8 @@ focaltech_moc_enroll_capture_cb (FpiDeviceFocaltechMoc *self,
+           enroll_status_report (self, ENROLL_RSP_RETRY, self->num_frames, NULL);
+         }
+ 
+-      if (self->num_frames == fp_device_get_nr_enroll_stages (FP_DEVICE (self)))
++      if (capture_result->remain == 0 ||
++          self->num_frames >= fp_device_get_nr_enroll_stages (FP_DEVICE (self)))
+         fpi_ssm_next_state (self->task_ssm);
+       else
+         fpi_ssm_jump_to_state (self->task_ssm, MOC_ENROLL_WAIT_FINGER);

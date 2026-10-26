@@ -71,7 +71,7 @@ class FingerprintTester:
                 "path": str(self.dev_path)
             }
         except Exception:
-            return {"name": "FocalTech Fingerprint Sensor", "scan_type": "press", "num_stages": 11, "path": str(self.dev_path)}
+            return {"name": "FocalTech Fingerprint Sensor", "scan_type": "press", "num_stages": 10, "path": str(self.dev_path)}
 
     def list_fingers(self):
         try:
@@ -119,11 +119,14 @@ class FingerprintTester:
                 self.device.VerifyStop()
             except Exception:
                 pass
+            try:
+                self.device.EnrollStop()
+            except Exception:
+                pass
             self.release()
         if self.loop and self.loop.is_running():
             self.loop.quit()
-        print(f"\n{DIM}[*] Scanner closed.{RESET}")
-        sys.exit(0)
+        return False
 
     # ── Interactive Scan Mode ──
     def run_scanner(self):
@@ -233,13 +236,13 @@ class FingerprintTester:
         total_stages = info["num_stages"]
 
         print(f"{BOLD}{MAGENTA}=================================================================={RESET}")
-        print(f"{BOLD}{MAGENTA}             Fingerprint Enrollment (11 Stages)                  {RESET}")
+        print(f"{BOLD}{MAGENTA}             Fingerprint Enrollment ({total_stages} Stages)                  {RESET}")
         print(f"{BOLD}{MAGENTA}=================================================================={RESET}")
         print(f" Enrolling: {BOLD}right-index-finger{RESET} for user {BOLD}{self.username}{RESET}\n")
         print(f" {BOLD}Best Practice for 100% Accuracy:{RESET}")
         print(f"  • {BOLD}Stages 1–4:{RESET} Center of your finger pad, flat and steady.")
         print(f"  • {BOLD}Stages 5–7:{RESET} Roll slightly left and right for edge coverage.")
-        print(f"  • {BOLD}Stages 8–11:{RESET} Slightly higher (tip) and lower (pad base).\n")
+        print(f"  • {BOLD}Stages 8–{total_stages}:{RESET} Slightly higher (tip) and lower (pad base).\n")
 
         if not self.claim():
             return
