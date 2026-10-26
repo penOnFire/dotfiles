@@ -325,7 +325,10 @@ class FingerprintTester:
             bar = "█" * (self.enroll_stage * 2) + "░" * ((total_stages - self.enroll_stage) * 2)
             print(f"{GREEN}[✓] Stage {self.enroll_stage}/{total_stages} passed! [{bar}] {pct}%{RESET}")
             if not done:
-                print(f"{BOLD}[{self.enroll_stage + 1}/{total_stages}] Lift finger and place it down again...{RESET}", flush=True)
+                if self.enroll_stage == total_stages - 1:
+                    print(f"\n{BOLD}{CYAN}[{total_stages}/{total_stages}] Final confirmation: place finger one last time to burn template into sensor...{RESET}", flush=True)
+                else:
+                    print(f"{BOLD}[{self.enroll_stage + 1}/{total_stages}] Lift finger and place it down again...{RESET}", flush=True)
         elif result == "enroll-completed":
             try:
                 self.device.EnrollStop()
