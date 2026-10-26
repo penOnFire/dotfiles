@@ -1,0 +1,1096 @@
+--- /tmp/focaltech_repo/driver/focaltech.h	2026-10-26 16:01:11.222943568 +0800
++++ /tmp/libfprint-1.94.9/libfprint/drivers/focaltech.h	2026-10-26 19:12:21.140717724 +0800
+@@ -69,4 +69,9 @@
+   gsize           recv_len;         /* Length of received data */
+   gint            enroll_stage;
+   gboolean        is_active;
++
++  /* Biometric verification state */
++  guint8          verify_response_code;
++  guint8          verify_template[TEMPLATE_SIZE];
++  gboolean        verify_has_template;
+ };
+--- /tmp/focaltech_repo/driver/focaltech.c	2026-10-26 16:01:11.222943568 +0800
++++ /tmp/libfprint-1.94.9/libfprint/drivers/focaltech.c	2026-10-26 19:12:54.009792132 +0800
+@@ -1,6 +1,6 @@
+ /*
+- * Focaltech 2808:9e65 driver for libfprint
+- * Copyright (C) 2025
++ * Focaltech 2808:9e65 / 2808:c6d5 driver for libfprint
++ * Copyright (C) 2025-2026
+  *
+  * This library is free software; you can redistribute it and/or
+  * modify it under the terms of the GNU Lesser General Public
+@@ -17,9 +17,6 @@
+  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+  */
+ 
+-#include "fpi-ssm.h"
+-#define FP_COMPONENT "focaltech"
+-
+ #include "drivers_api.h"
+ #include "focaltech.h"
+ 
+@@ -28,6 +25,7 @@
+ /* Device ID table */
+ static const FpIdEntry id_table[] = {
+   { .vid = 0x2808, .pid = 0x9e65 },
++  { .vid = 0x2808, .pid = 0xc6d5 },
+   { .vid = 0,      .pid = 0 },
+ };
+ 
+@@ -37,31 +35,30 @@
+ calc_checksum (const guint8 *data, gsize len)
+ {
+   guint8 chk = 0;
+-  
++
+   for (gsize i = 2; i < len; i++)
+     chk ^= data[i];
+-    
++
+   return chk;
+ }
+ 
+ static guint8 *
+ build_packet (guint8 cmd, const guint8 *args, gsize args_len, gsize *out_len)
+ {
+-  gsize payload_len = 1 + args_len;
++  guint8 payload_len = 1 + args_len;
+   gsize total_len = 3 + payload_len + 1;
+-  
+-  guint8 *buf = g_malloc0 (total_len);
+-  
++  guint8 *buf = g_malloc (total_len);
++
+   buf[0] = 0x02;
+   buf[1] = 0x00;
+   buf[2] = payload_len;
+   buf[3] = cmd;
+-  
++
+   if (args && args_len > 0)
+     memcpy (&buf[4], args, args_len);
+-  
++
+   buf[3 + payload_len] = calc_checksum (buf, total_len - 1);
+-  
++
+   *out_len = total_len;
+   return buf;
+ }
+@@ -69,15 +66,20 @@
+ static gboolean
+ verify_checksum (const guint8 *data, gsize len)
+ {
++  if (len < 4 || data[0] != 0x02)
++    return FALSE;
++
++  guint8 payload_len = data[2];
++  if (len < (gsize)(3 + payload_len + 1))
++    return FALSE;
++
+   guint8 chk = 0;
+-  
+-  for (gsize i = 2; i < len; i++)
++  for (gsize i = 2; i < 3 + payload_len; i++)
+     chk ^= data[i];
+-  
+-  return (chk == 0);
+-}
+ 
+-/* ============= State Machine Helpers ============= */
++  guint8 packet_chk = data[3 + payload_len];
++  return (chk == packet_chk);
++}
+ 
+ /* ============= USB Transfer Callbacks ============= */
+ 
+@@ -86,10 +88,11 @@
+          gpointer user_data, GError *error)
+ {
+   FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
+-  
++  FpiSsm *ssm = transfer->ssm;
++
+   if (error)
+     {
+-      fpi_ssm_mark_failed (self->task_ssm, error);
++      fpi_ssm_mark_failed (ssm, error);
+       return;
+     }
+ 
+@@ -98,11 +101,11 @@
+     {
+       if (!verify_checksum (transfer->buffer, transfer->actual_length))
+         {
+-          fpi_ssm_mark_failed (self->task_ssm,
+-                              fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
++          fpi_ssm_mark_failed (ssm,
++                               fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
+           return;
+         }
+-      
++
+       /* Copy received data to our buffer for later processing */
+       self->recv_len = MIN (transfer->actual_length, sizeof (self->recv_buffer));
+       memcpy (self->recv_buffer, transfer->buffer, self->recv_len);
+@@ -112,186 +115,94 @@
+       self->recv_len = 0;
+     }
+ 
+-  /* Store received data in transfer buffer for state handler to process */
+-  fpi_ssm_next_state (self->task_ssm);
++  fpi_ssm_next_state (ssm);
+ }
+ 
+ static void
+ send_cb (FpiUsbTransfer *transfer, FpDevice *device,
+          gpointer user_data, GError *error)
+ {
+-  FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
+-  
+   if (error)
+     {
+-      fpi_ssm_mark_failed (self->task_ssm, error);
++      fpi_ssm_mark_failed (transfer->ssm, error);
+       return;
+     }
+ 
+-  fpi_ssm_next_state (self->task_ssm);
++  fpi_ssm_next_state (transfer->ssm);
+ }
+ 
+ /* ============= Command Transactions ============= */
+ 
+ static void
+-send_command (FpDevice *device, guint8 cmd, const guint8 *args, 
++send_command (FpDevice *device, guint8 cmd, const guint8 *args,
+               gsize args_len, FpiUsbTransferCallback callback)
+ {
+   FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
+   gsize packet_len;
+   guint8 *packet = build_packet (cmd, args, args_len, &packet_len);
+-  
++
+   FpiUsbTransfer *transfer = fpi_usb_transfer_new (device);
+   fpi_usb_transfer_fill_bulk_full (transfer, FOCALTECH_EP_OUT,
+                                    packet, packet_len, g_free);
+   transfer->ssm = self->task_ssm;
+-  
++
+   fpi_usb_transfer_submit (transfer, FOCALTECH_CMD_TIMEOUT,
+-                          NULL, callback, NULL);
++                           NULL, callback, NULL);
+ }
+ 
+ static void
+ receive_response (FpDevice *device, FpiUsbTransferCallback callback)
+ {
+   FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
+-  
++
+   FpiUsbTransfer *transfer = fpi_usb_transfer_new (device);
+   fpi_usb_transfer_fill_bulk (transfer, FOCALTECH_EP_IN, 64);
+   transfer->ssm = self->task_ssm;
+-  
+-  fpi_usb_transfer_submit (transfer, FOCALTECH_CMD_TIMEOUT,
+-                          NULL, callback, NULL);
+-}
+ 
+-/* ============= Device Open State Machine ============= */
+-
+-enum open_states {
+-  OPEN_WAKE_SEND,
+-  OPEN_WAKE_RECV,
+-  OPEN_INIT_SEND,
+-  OPEN_INIT_RECV,
+-  OPEN_NUM_STATES,
+-};
+-
+-static void
+-open_run_state (FpiSsm *ssm, FpDevice *device)
+-{
+-  guint8 args[3];
+-  
+-  switch (fpi_ssm_get_cur_state (ssm))
+-    {
+-    case OPEN_WAKE_SEND:
+-      args[0] = 0x01;
+-      args[1] = 0x02;
+-      send_command (device, CMD_POWER, args, 2, send_cb);
+-      break;
+-      
+-    case OPEN_WAKE_RECV:
+-      receive_response (device, recv_cb);
+-      break;
+-      
+-    case OPEN_INIT_SEND:
+-      args[0] = 0x01;
+-      args[1] = 0x01;
+-      args[2] = 0x00;
+-      send_command (device, CMD_INIT, args, 3, send_cb);
+-      break;
+-      
+-    case OPEN_INIT_RECV:
+-      receive_response (device, recv_cb);
+-      break;
+-    }
++  fpi_usb_transfer_submit (transfer, FOCALTECH_CMD_TIMEOUT,
++                           NULL, callback, NULL);
+ }
+ 
+-static void
+-open_complete (FpiSsm *ssm, FpDevice *device, GError *error)
+-{
+-  FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
+-  
+-  self->task_ssm = NULL;
+-  
+-  if (error)
+-    fpi_device_open_complete (device, error);
+-  else
+-    {
+-      self->is_active = TRUE;
+-      fpi_device_open_complete (device, NULL);
+-    }
+-}
++/* ============= Device Open / Close ============= */
+ 
+ static void
+ focaltech_open (FpDevice *device)
+ {
+   FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
+   GError *error = NULL;
+-  
++
+   /* Claim USB interface */
+   if (!g_usb_device_claim_interface (fpi_device_get_usb_device (device), 0, 0, &error))
+     {
+       fpi_device_open_complete (device, error);
+       return;
+     }
+-  
+-  /* Generate crypto key (in production, this should be more secure) */
++
+   for (int i = 0; i < CRYPTO_KEY_SIZE; i++)
+     self->crypto_key[i] = 0x42 + i;
+-  
+-  self->task_ssm = fpi_ssm_new (device, open_run_state, OPEN_NUM_STATES);
+-  fpi_ssm_start (self->task_ssm, open_complete);
+-}
+-
+-/* ============= Device Close State Machine ============= */
+ 
+-enum close_states {
+-  CLOSE_RESET_SEND,
+-  CLOSE_RESET_RECV,
+-  CLOSE_NUM_STATES,
+-};
+-
+-static void
+-close_run_state (FpiSsm *ssm, FpDevice *device)
+-{
+-  guint8 args[1];
+-
+-  switch (fpi_ssm_get_cur_state (ssm))
+-    {
+-    case CLOSE_RESET_SEND:
+-      args[0] = 0x78;
+-      send_command (device, CMD_RESET, args, 1, send_cb);
+-      break;
+-
+-    case CLOSE_RESET_RECV:
+-      receive_response (device, recv_cb);
+-      break;
+-    }
+-}
+-
+-static void
+-close_complete (FpiSsm *ssm, FpDevice *device, GError *error)
+-{
+-  FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
+-  GError *release_error = NULL;
+-
+-  self->task_ssm = NULL;
+-  self->is_active = FALSE;
+-
+-  g_usb_device_release_interface (fpi_device_get_usb_device (device), 0, 0, &release_error);
+-
+-  fpi_device_close_complete (device, error ? error : release_error);
++  self->is_active = TRUE;
++  fpi_device_open_complete (device, NULL);
+ }
+ 
+ static void
+ focaltech_close (FpDevice *device)
+ {
+   FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
++  GError *error = NULL;
+ 
+-  self->task_ssm = fpi_ssm_new (device, close_run_state, CLOSE_NUM_STATES);
+-  fpi_ssm_start (self->task_ssm, close_complete);
++  self->is_active = FALSE;
++  g_usb_device_release_interface (fpi_device_get_usb_device (device), 0, 0, &error);
++  fpi_device_close_complete (device, error);
+ }
+ 
+ /* ============= Enrollment State Machine ============= */
+ 
+ enum enroll_states {
++  ENROLL_INIT_WAKE_SEND,
++  ENROLL_INIT_WAKE_RECV,
++  ENROLL_INIT_SEND,
++  ENROLL_INIT_RECV,
+   ENROLL_CHECK_STATUS_SEND,
+   ENROLL_CHECK_STATUS_RECV,
+   ENROLL_CHECK_SECURE_SEND,
+@@ -314,21 +225,8 @@
+   ENROLL_FINALIZE_SECURE_RECV,
+   ENROLL_FINALIZE_SEND,
+   ENROLL_FINALIZE_RECV,
+-  ENROLL_FINAL_WAKE_SEND,
+-  ENROLL_FINAL_WAKE_RECV,
+-  ENROLL_FINAL_POLL_SEND,
+-  ENROLL_FINAL_POLL_RECV,
+-  ENROLL_FINAL_POLL_CHECK,
+-  ENROLL_FINAL_CAPTURE_SEND,
+-  ENROLL_FINAL_CAPTURE_RECV,
+-  ENROLL_FINAL_PROGRESS_SEND,
+-  ENROLL_FINAL_PROGRESS_RECV,
+-  ENROLL_FINAL_RESET_SEND,
+-  ENROLL_FINAL_RESET_RECV,
+-  ENROLL_FINAL_SECURE_SEND,
+-  ENROLL_FINAL_SECURE_RECV,
+-  ENROLL_GET_TEMPLATE_SEND,
+-  ENROLL_GET_TEMPLATE_RECV,
++  ENROLL_FINALIZE_RESET_SEND,
++  ENROLL_FINALIZE_RESET_RECV,
+   ENROLL_NUM_STATES,
+ };
+ 
+@@ -336,220 +234,156 @@
+ enroll_run_state (FpiSsm *ssm, FpDevice *device)
+ {
+   FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
+-  guint8 args[32];
+-  
++  guint8 args[3];
++
+   switch (fpi_ssm_get_cur_state (ssm))
+     {
++    case ENROLL_INIT_WAKE_SEND:
++      args[0] = 0x01;
++      args[1] = 0x02;
++      send_command (device, CMD_POWER, args, 2, send_cb);
++      break;
++
++    case ENROLL_INIT_WAKE_RECV:
++      receive_response (device, recv_cb);
++      break;
++
++    case ENROLL_INIT_SEND:
++      args[0] = 0x01;
++      args[1] = 0x01;
++      args[2] = 0x00;
++      send_command (device, CMD_INIT, args, 3, send_cb);
++      break;
++
++    case ENROLL_INIT_RECV:
++      receive_response (device, recv_cb);
++      break;
++
+     case ENROLL_CHECK_STATUS_SEND:
+       send_command (device, CMD_STATUS, NULL, 0, send_cb);
+       break;
+-      
++
+     case ENROLL_CHECK_STATUS_RECV:
+       receive_response (device, recv_cb);
+       break;
+-      
++
+     case ENROLL_CHECK_SECURE_SEND:
+       send_command (device, CMD_SECURE, NULL, 0, send_cb);
+       break;
+-      
++
+     case ENROLL_CHECK_SECURE_RECV:
+       receive_response (device, recv_cb);
+       break;
+-      
++
+     case ENROLL_SEND_KEY_SEND:
+-      send_command (device, CMD_ENROLL_KEY, self->crypto_key, 
+-                   CRYPTO_KEY_SIZE, send_cb);
++      send_command (device, CMD_ENROLL_KEY, self->crypto_key,
++                    CRYPTO_KEY_SIZE, send_cb);
+       break;
+-      
++
+     case ENROLL_SEND_KEY_RECV:
+       receive_response (device, recv_cb);
+       break;
+-      
++
+     case ENROLL_WAKE_SEND:
+       args[0] = 0x01;
+       args[1] = 0x02;
+       send_command (device, CMD_POWER, args, 2, send_cb);
+       break;
+-      
++
+     case ENROLL_WAKE_RECV:
+       receive_response (device, recv_cb);
+       break;
+-      
++
+     case ENROLL_POLL_SEND:
+       args[0] = 0x02;
+       args[1] = 0x01;
+       send_command (device, CMD_POWER, args, 2, send_cb);
+       break;
+-      
++
+     case ENROLL_POLL_RECV:
+       receive_response (device, recv_cb);
+       break;
+-      
++
+     case ENROLL_POLL_CHECK:
+-      /* Check if finger detected */
+-      if (self->recv_len >= 5)
++      /* Check if finger detected (byte 4 == 0x01) */
++      if (self->recv_len < 5 || self->recv_buffer[4] != 0x01)
+         {
+-          guint8 finger_status = self->recv_buffer[4];
+-          
+-          if (finger_status != 0x01)
+-            {
+-              /* No finger, retry poll */
+-              fpi_ssm_jump_to_state_delayed(ssm, ENROLL_POLL_SEND, 200);
+-              return;
+-            }
++          /* No finger, retry poll every 150ms */
++          fpi_ssm_jump_to_state_delayed (ssm, ENROLL_POLL_SEND, 150);
++          return;
+         }
+       fpi_ssm_next_state (ssm);
+       break;
+-      
++
+     case ENROLL_CAPTURE_SEND:
+       args[0] = 0x02;
+       args[1] = 0x00;
+       send_command (device, CMD_CAPTURE, args, 2, send_cb);
+       break;
+-      
++
+     case ENROLL_CAPTURE_RECV:
+       receive_response (device, recv_cb);
+       break;
+-      
++
+     case ENROLL_PROGRESS_SEND:
+       send_command (device, CMD_PROGRESS, NULL, 0, send_cb);
+       break;
+-      
++
+     case ENROLL_PROGRESS_RECV:
+       receive_response (device, recv_cb);
+       break;
+-      
++
+     case ENROLL_RESET_SEND:
+       args[0] = 0x78;
+       send_command (device, CMD_RESET, args, 1, send_cb);
+       break;
+-      
++
+     case ENROLL_RESET_RECV:
+       receive_response (device, recv_cb);
+       break;
+-      
++
+     case ENROLL_CHECK_COMPLETE:
+       self->enroll_stage++;
+       fpi_device_enroll_progress (device, self->enroll_stage, NULL, NULL);
+-      
++
+       if (self->enroll_stage < ENROLL_STAGES)
+         {
+-          /* Need more stages, jump back to wake directly without delay */
+-          fpi_ssm_jump_to_state_delayed (ssm, ENROLL_WAKE_SEND, 200);
++          /* User must lift finger; resume polling after 250ms */
++          fpi_ssm_jump_to_state_delayed (ssm, ENROLL_WAKE_SEND, 250);
+         }
+       else
+         {
+-          /* All stages complete, proceed to finalization */
++          /* All 10 stages captured; proceed directly to finalization */
+           fpi_ssm_next_state (ssm);
+         }
+       break;
+-      
++
+     case ENROLL_FINALIZE_SECURE_SEND:
+       send_command (device, CMD_SECURE, NULL, 0, send_cb);
+       break;
+-      
++
+     case ENROLL_FINALIZE_SECURE_RECV:
+       receive_response (device, recv_cb);
+       break;
+-      
++
+     case ENROLL_FINALIZE_SEND:
+-      send_command (device, CMD_FINALIZE, self->crypto_key, 
+-                   CRYPTO_KEY_SIZE, send_cb);
++      send_command (device, CMD_FINALIZE, self->crypto_key,
++                    CRYPTO_KEY_SIZE, send_cb);
+       break;
+-      
++
+     case ENROLL_FINALIZE_RECV:
+       receive_response (device, recv_cb);
++      /* The 32-byte enrolled template in the hardware is keyed to self->crypto_key */
++      memcpy (self->enrolled_template, self->crypto_key, TEMPLATE_SIZE);
+       break;
+-      
+-    case ENROLL_FINAL_WAKE_SEND:
+-      args[0] = 0x01;
+-      args[1] = 0x02;
+-      send_command (device, CMD_POWER, args, 2, send_cb);
+-      break;
+-      
+-    case ENROLL_FINAL_WAKE_RECV:
+-      receive_response (device, recv_cb);
+-      break;
+-      
+-    case ENROLL_FINAL_POLL_SEND:
+-      args[0] = 0x02;
+-      args[1] = 0x01;
+-      send_command (device, CMD_POWER, args, 2, send_cb);
+-      break;
+-      
+-    case ENROLL_FINAL_POLL_RECV:
+-      receive_response (device, recv_cb);
+-      break;
+-      
+-    case ENROLL_FINAL_POLL_CHECK:
+-      /* Check if finger detected */
+-      if (self->recv_len >= 5)
+-        {
+-          guint8 finger_status = self->recv_buffer[4];
+-          
+-          if (finger_status != 0x01)
+-            {
+-              /* No finger, retry poll */
+-              fpi_ssm_jump_to_state_delayed (ssm, ENROLL_FINAL_POLL_SEND, 200);
+-              return;
+-            }
+-        }
+-      fpi_ssm_next_state (ssm);
+-      break;
+-      
+-    case ENROLL_FINAL_CAPTURE_SEND:
+-      args[0] = 0x02;
+-      args[1] = 0x00;
+-      send_command (device, CMD_CAPTURE, args, 2, send_cb);
+-      break;
+-      
+-    case ENROLL_FINAL_CAPTURE_RECV:
+-      receive_response (device, recv_cb);
+-      break;
+-      
+-    case ENROLL_FINAL_PROGRESS_SEND:
+-      send_command (device, CMD_PROGRESS, NULL, 0, send_cb);
+-      break;
+-      
+-    case ENROLL_FINAL_PROGRESS_RECV:
+-      receive_response (device, recv_cb);
+-      break;
+-      
+-    case ENROLL_FINAL_RESET_SEND:
++
++    case ENROLL_FINALIZE_RESET_SEND:
+       args[0] = 0x78;
+       send_command (device, CMD_RESET, args, 1, send_cb);
+       break;
+-      
+-    case ENROLL_FINAL_RESET_RECV:
+-      receive_response (device, recv_cb);
+-      break;
+-      
+-    case ENROLL_FINAL_SECURE_SEND:
+-      send_command (device, CMD_SECURE, NULL, 0, send_cb);
+-      break;
+-      
+-    case ENROLL_FINAL_SECURE_RECV:
+-      receive_response (device, recv_cb);
+-      break;
+-      
+-    case ENROLL_GET_TEMPLATE_SEND:
+-      send_command (device, CMD_VERIFY, NULL, 0, send_cb);
+-      break;
+-      
+-    case ENROLL_GET_TEMPLATE_RECV:
++
++    case ENROLL_FINALIZE_RESET_RECV:
+       receive_response (device, recv_cb);
+-      
+-      /* Extract the 32-byte template */
+-      if (self->recv_len >= 36)
+-        {
+-          guint8 response_code = self->recv_buffer[3];
+-          guint8 payload_len = self->recv_buffer[2];
+-          
+-          if (response_code == RESP_OK && (payload_len - 1) >= TEMPLATE_SIZE)
+-            {
+-              memcpy (self->enrolled_template, &self->recv_buffer[4], TEMPLATE_SIZE);
+-            }
+-        }
+       break;
+     }
+ }
+@@ -559,28 +393,28 @@
+ {
+   FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
+   FpPrint *print = NULL;
+-  
++
+   self->task_ssm = NULL;
+-  
++
+   if (error)
+     {
+       fpi_device_enroll_complete (device, NULL, error);
+       return;
+     }
+-  
+-  /* Create print with stored template */
++
++  /* Create print with enrolled template */
+   fpi_device_get_enroll_data (device, &print);
+-  
++
+   GVariant *data = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
+                                               self->enrolled_template,
+                                               TEMPLATE_SIZE, 1);
+   GVariant *wrapper = g_variant_new ("(@ay)", data);
+-  
++
+   fpi_print_set_type (print, FPI_PRINT_RAW);
+   fpi_print_set_device_stored (print, FALSE);
+   g_object_set (print, "fpi-data", wrapper, NULL);
+   g_object_set (print, "description", "Focaltech enrolled finger", NULL);
+-  
++
+   fpi_device_enroll_complete (device, g_object_ref (print), NULL);
+ }
+ 
+@@ -588,9 +422,13 @@
+ focaltech_enroll (FpDevice *device)
+ {
+   FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
+-  
++
+   self->enroll_stage = 0;
+-  
++
++  /* Generate a fresh 32-byte key for this enrollment */
++  for (int i = 0; i < CRYPTO_KEY_SIZE; i++)
++    self->crypto_key[i] = g_random_int_range (0, 256);
++
+   self->task_ssm = fpi_ssm_new (device, enroll_run_state, ENROLL_NUM_STATES);
+   fpi_ssm_start (self->task_ssm, enroll_complete);
+ }
+@@ -602,8 +440,6 @@
+   VERIFY_WAKE_RECV,
+   VERIFY_INIT_SEND,
+   VERIFY_INIT_RECV,
+-  VERIFY_SEND_KEY_SEND,
+-  VERIFY_SEND_KEY_RECV,
+   VERIFY_POLL_SEND,
+   VERIFY_POLL_RECV,
+   VERIFY_POLL_CHECK,
+@@ -617,6 +453,9 @@
+   VERIFY_SECURE_RECV,
+   VERIFY_MATCH_SEND,
+   VERIFY_MATCH_RECV,
++  VERIFY_MATCH_PARSE,
++  VERIFY_RESET_POST_SEND,
++  VERIFY_RESET_POST_RECV,
+   VERIFY_NUM_STATES,
+ };
+ 
+@@ -625,7 +464,7 @@
+ {
+   FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
+   guint8 args[3];
+-  
++
+   switch (fpi_ssm_get_cur_state (ssm))
+     {
+     case VERIFY_WAKE_SEND:
+@@ -633,136 +472,110 @@
+       args[1] = 0x02;
+       send_command (device, CMD_POWER, args, 2, send_cb);
+       break;
+-      
++
+     case VERIFY_WAKE_RECV:
+       receive_response (device, recv_cb);
+       break;
+-      
++
+     case VERIFY_INIT_SEND:
+       args[0] = 0x01;
+       args[1] = 0x01;
+       args[2] = 0x00;
+       send_command (device, CMD_INIT, args, 3, send_cb);
+       break;
+-      
++
+     case VERIFY_INIT_RECV:
+       receive_response (device, recv_cb);
+       break;
+-      
+-    case VERIFY_SEND_KEY_SEND:
+-      {
+-        /* Load stored template and send to device */
+-        FpPrint *verify_print = NULL;
+-        fpi_device_get_verify_data (device, &verify_print);
+-        
+-      if (verify_print)
+-          {
+-            GVariant *data = NULL;
+-            g_object_get (verify_print, "fpi-data", &data, NULL);
+-            
+-            if (data && g_variant_check_format_string (data, "(@ay)", FALSE))
+-              {
+-                GVariant *template_var = NULL;
+-                g_variant_get (data, "(@ay)", &template_var);
+-                
+-                gsize template_len = 0;
+-                const guint8 *stored_template = g_variant_get_fixed_array (template_var,
+-                                                                           &template_len, 1);
+-                
+-                if (template_len == TEMPLATE_SIZE)
+-                  {
+-                    send_command (device, CMD_ENROLL_KEY, stored_template, 
+-                                template_len, send_cb);
+-                    g_variant_unref (template_var);
+-                    g_variant_unref (data);
+-                    break;
+-                  }
+-                
+-                g_variant_unref (template_var);
+-              }
+-            
+-            if (data)
+-              g_variant_unref (data);
+-          }
+-        
+-        /* If we get here, couldn't load template */
+-        fpi_ssm_mark_failed (ssm,
+-                            fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID));
+-      }
+-      break;
+-      
+-    case VERIFY_SEND_KEY_RECV:
+-      receive_response (device, recv_cb);
+-      break;
+-      
++
+     case VERIFY_POLL_SEND:
+       args[0] = 0x02;
+       args[1] = 0x01;
+       send_command (device, CMD_POWER, args, 2, send_cb);
+       break;
+-      
++
+     case VERIFY_POLL_RECV:
+       receive_response (device, recv_cb);
+       break;
+-      
++
+     case VERIFY_POLL_CHECK:
+-      /* Check if finger detected */
+-      if (self->recv_len >= 5)
++      /* Check if finger detected (byte 4 == 0x01) */
++      if (self->recv_len < 5 || self->recv_buffer[4] != 0x01)
+         {
+-          guint8 finger_status = self->recv_buffer[4];
+-          
+-          if (finger_status != 0x01)
+-            {
+-              /* No finger, retry poll */
+-              fpi_ssm_jump_to_state_delayed (ssm, VERIFY_POLL_SEND, 200);
+-              return;
+-            }
++          /* No finger, retry poll every 150ms */
++          fpi_ssm_jump_to_state_delayed (ssm, VERIFY_POLL_SEND, 150);
++          return;
+         }
+       fpi_ssm_next_state (ssm);
+       break;
+-      
++
+     case VERIFY_CAPTURE_SEND:
+       args[0] = 0x02;
+       args[1] = 0x00;
+       send_command (device, CMD_CAPTURE, args, 2, send_cb);
+       break;
+-      
++
+     case VERIFY_CAPTURE_RECV:
+       receive_response (device, recv_cb);
+       break;
+-      
++
+     case VERIFY_PROGRESS_SEND:
+       send_command (device, CMD_PROGRESS, NULL, 0, send_cb);
+       break;
+-      
++
+     case VERIFY_PROGRESS_RECV:
+       receive_response (device, recv_cb);
+       break;
+-      
++
+     case VERIFY_RESET_SEND:
+       args[0] = 0x78;
+       send_command (device, CMD_RESET, args, 1, send_cb);
+       break;
+-      
++
+     case VERIFY_RESET_RECV:
+       receive_response (device, recv_cb);
+       break;
+-      
++
+     case VERIFY_SECURE_SEND:
+       send_command (device, CMD_SECURE, NULL, 0, send_cb);
+       break;
+-      
++
+     case VERIFY_SECURE_RECV:
+       receive_response (device, recv_cb);
+       break;
+-      
++
+     case VERIFY_MATCH_SEND:
+       send_command (device, CMD_VERIFY, NULL, 0, send_cb);
+       break;
+-      
++
+     case VERIFY_MATCH_RECV:
+       receive_response (device, recv_cb);
+       break;
++
++    case VERIFY_MATCH_PARSE:
++      /* Parse response from CMD_VERIFY before post-reset overwrites recv_buffer */
++      self->verify_response_code = (self->recv_len >= 4) ? self->recv_buffer[3] : 0xff;
++      if (self->recv_len >= 36 && self->verify_response_code == RESP_OK)
++        {
++          memcpy (self->verify_template, &self->recv_buffer[4], TEMPLATE_SIZE);
++          self->verify_has_template = TRUE;
++        }
++      else
++        {
++          self->verify_has_template = FALSE;
++          memset (self->verify_template, 0, TEMPLATE_SIZE);
++        }
++      fpi_ssm_next_state (ssm);
++      break;
++
++    case VERIFY_RESET_POST_SEND:
++      args[0] = 0x78;
++      send_command (device, CMD_RESET, args, 1, send_cb);
++      break;
++
++    case VERIFY_RESET_POST_RECV:
++      receive_response (device, recv_cb);
++      break;
+     }
+ }
+ 
+@@ -771,27 +584,65 @@
+ {
+   FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
+   gboolean match = FALSE;
+-  
++
+   self->task_ssm = NULL;
+-  
++
+   if (error)
+     {
+       fpi_device_verify_complete (device, error);
+       return;
+     }
+-  
+-  /* Check device response for match status */
+-  if (self->recv_len >= 4)
+-    {
+-      guint8 response_code = self->recv_buffer[3];
+-      
+-      /* RESP_OK (0x04) means match, anything else is no match */
+-      if (response_code == RESP_OK)
++
++  /* Biometric match verification:
++   * Only consider a match if the sensor hardware returned RESP_OK (0x04) to CMD_VERIFY.
++   * If hardware returned RESP_NO_MATCH (0x09) or any other status, match remains FALSE.
++   */
++  if (self->verify_response_code == RESP_OK)
++    {
++      FpPrint *verify_print = NULL;
++      fpi_device_get_verify_data (device, &verify_print);
++      const guint8 *stored_template = NULL;
++      gsize template_len = 0;
++      GVariant *data = NULL;
++      GVariant *template_var = NULL;
++
++      if (verify_print)
++        g_object_get (verify_print, "fpi-data", &data, NULL);
++
++      if (data)
+         {
++          if (g_variant_is_of_type (data, G_VARIANT_TYPE ("(ay)")))
++            {
++              g_variant_get (data, "(@ay)", &template_var);
++              stored_template = g_variant_get_fixed_array (template_var, &template_len, 1);
++            }
++          else if (g_variant_is_of_type (data, G_VARIANT_TYPE_BYTESTRING))
++            {
++              stored_template = g_variant_get_fixed_array (data, &template_len, 1);
++            }
++        }
++
++      /* If hardware returned the 32-byte template payload and we have an enrolled template,
++       * compare them to confirm exact match */
++      if (self->verify_has_template && stored_template && template_len == TEMPLATE_SIZE)
++        {
++          if (memcmp (self->verify_template, stored_template, TEMPLATE_SIZE) == 0)
++            match = TRUE;
++          else
++            fp_warn ("Hardware returned RESP_OK but template key did not match stored print");
++        }
++      else if (self->verify_response_code == RESP_OK && !stored_template)
++        {
++          /* If no stored template was bound to print, accept hardware MOC match */
+           match = TRUE;
+         }
++
++      if (template_var)
++        g_variant_unref (template_var);
++      if (data)
++        g_variant_unref (data);
+     }
+-  
++
+   if (match)
+     {
+       fpi_device_verify_report (device, FPI_MATCH_SUCCESS, NULL, NULL);
+@@ -808,52 +659,41 @@
+ focaltech_verify (FpDevice *device)
+ {
+   FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
+-  
+-  self->task_ssm = fpi_ssm_new (device, verify_run_state, VERIFY_NUM_STATES);
+-  fpi_ssm_start (self->task_ssm, verify_complete);
+-}
+ 
+-/* ============= Identify (same as verify for this device) ============= */
++  self->verify_response_code = 0xff;
++  self->verify_has_template = FALSE;
++  memset (self->verify_template, 0, TEMPLATE_SIZE);
+ 
+-static void
+-focaltech_identify (FpDevice *device)
+-{
+-  FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
+-  GPtrArray *prints;
+-  
+-  /* For simplicity, we'll verify against each print in the gallery */
+-  /* A more optimized version would do this in one pass */
+-  
+-  fpi_device_get_identify_data (device, &prints);
+-  
+-  if (prints->len == 0)
+-    {
+-      /* No prints to identify against - report no match and complete */
+-      fpi_device_identify_report (device, NULL, NULL, NULL);
+-      fpi_device_identify_complete (device, NULL);
+-      return;
+-    }
+-  
+-  /* For now, just use the first print for verification */
+-  /* TODO: Implement proper gallery matching */
+   self->task_ssm = fpi_ssm_new (device, verify_run_state, VERIFY_NUM_STATES);
+   fpi_ssm_start (self->task_ssm, verify_complete);
+ }
+ 
+-/* ============= Driver Setup ============= */
++/* ============= Driver Cancellation ============= */
+ 
+ static void
+ focaltech_cancel (FpDevice *device)
+ {
+   FpiDeviceFocaltech *self = FPI_DEVICE_FOCALTECH (device);
+-  
+-  /* Release any pending transfers by marking state machine as failed */
++
+   if (self->task_ssm)
+     {
++      int state = fpi_ssm_get_cur_state (self->task_ssm);
++
++      if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_ENROLL)
++        {
++          if (state == ENROLL_POLL_CHECK || state == ENROLL_CHECK_COMPLETE)
++            fpi_ssm_cancel_delayed_state_change (self->task_ssm);
++        }
++      else if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_VERIFY)
++        {
++          if (state == VERIFY_POLL_CHECK)
++            fpi_ssm_cancel_delayed_state_change (self->task_ssm);
++        }
++
+       fpi_ssm_mark_failed (self->task_ssm,
+-                          g_error_new_literal (G_IO_ERROR,
+-                                              G_IO_ERROR_CANCELLED,
+-                                              "Operation was cancelled"));
++                           g_error_new_literal (G_IO_ERROR,
++                                               G_IO_ERROR_CANCELLED,
++                                               "Operation was cancelled"));
+     }
+ }
+ 
+@@ -869,20 +709,20 @@
+ fpi_device_focaltech_class_init (FpiDeviceFocaltechClass *klass)
+ {
+   FpDeviceClass *dev_class = FP_DEVICE_CLASS (klass);
+-  
++
+   dev_class->id = "focaltech";
+   dev_class->full_name = FOCALTECH_DRIVER_FULLNAME;
+   dev_class->type = FP_DEVICE_TYPE_USB;
+   dev_class->id_table = id_table;
+-  dev_class->scan_type = FP_SCAN_TYPE_PRESS;
++
+   dev_class->nr_enroll_stages = ENROLL_STAGES;
+-  
++  dev_class->scan_type = FP_SCAN_TYPE_PRESS;
++
+   dev_class->open = focaltech_open;
+   dev_class->close = focaltech_close;
+   dev_class->enroll = focaltech_enroll;
+   dev_class->verify = focaltech_verify;
+-  dev_class->identify = focaltech_identify;
+   dev_class->cancel = focaltech_cancel;
+-  
+-  dev_class->features = FP_DEVICE_FEATURE_VERIFY | FP_DEVICE_FEATURE_IDENTIFY;
++
++  dev_class->features = FP_DEVICE_FEATURE_VERIFY;
+ }
