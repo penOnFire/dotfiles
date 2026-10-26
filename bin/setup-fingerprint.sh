@@ -46,6 +46,55 @@ echo "[*] Ensuring fprintd and libpam-fprintd packages are installed..."
 apt-get update -qq
 apt-get install -y --no-install-recommends fprintd libpam-fprintd libfprint-2-2
 
+# Resolve and stage the FocalTech host matcher before changing the active
+# library or stopping fprintd, so a missing archive cannot leave a half setup.
+ENGINE_INSTALL_DIR="/usr/lib/libfprint-2"
+ENGINE_INSTALL_PATH="$ENGINE_INSTALL_DIR/ftWbioEngineAdapter.dll"
+ENGINE_DLL_SOURCE=""
+for candidate in \
+    "$SCRIPT_DIR/ftWbioEngineAdapter.dll" \
+    "$TARGET_HOME/Downloads/Fingerprint/x64/ftWbioEngineAdapter.dll" \
+    "/tmp/k14s-fingerprint/Fingerprint/x64/ftWbioEngineAdapter.dll"; do
+    if [ -r "$candidate" ]; then
+        ENGINE_DLL_SOURCE="$candidate"
+        break
+    fi
+done
+
+ENGINE_TMP_DIR=""
+if [ -z "$ENGINE_DLL_SOURCE" ]; then
+    ENGINE_ARCHIVE="$TARGET_HOME/Downloads/MEGABOOK K14S AMD 7000_20260609.7z"
+    if [ ! -r "$ENGINE_ARCHIVE" ]; then
+        echo "[-] Could not find ftWbioEngineAdapter.dll or the official MEGABOOK driver archive." >&2
+        echo "    Expected: $ENGINE_ARCHIVE" >&2
+        exit 1
+    fi
+
+    SEVEN_ZIP=""
+    for candidate in 7z 7zz 7za; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            SEVEN_ZIP=$(command -v "$candidate")
+            break
+        fi
+    done
+    if [ -z "$SEVEN_ZIP" ]; then
+        echo "[-] 7-Zip is required to extract the matcher DLL from $ENGINE_ARCHIVE" >&2
+        exit 1
+    fi
+
+    ENGINE_TMP_DIR=$(mktemp -d)
+    ENGINE_DLL_SOURCE="$ENGINE_TMP_DIR/ftWbioEngineAdapter.dll"
+    if ! "$SEVEN_ZIP" x -so "$ENGINE_ARCHIVE" 'Fingerprint/x64/ftWbioEngineAdapter.dll' > "$ENGINE_DLL_SOURCE"; then
+        echo "[-] Could not extract the matcher DLL from $ENGINE_ARCHIVE" >&2
+        exit 1
+    fi
+fi
+
+if [ ! -s "$ENGINE_DLL_SOURCE" ]; then
+    echo "[-] FocalTech matcher DLL is missing or empty: $ENGINE_DLL_SOURCE" >&2
+    exit 1
+fi
+
 # 2. Setup udev rule for device access
 echo "[*] Installing udev rule for FocalTech fingerprint sensor..."
 cat << 'EOF' > /etc/udev/rules.d/70-focaltech.rules
@@ -104,11 +153,29 @@ for dev in /sys/bus/usb/devices/*; do
 done
 
 echo "[*] Installing patched libfprint driver..."
-rm -f "$LIB_DIR/libfprint-2.so.2.0.0.bak" "$ALT_LIB_DIR/libfprint-2.so.2.0.0.bak" 2>/dev/null || true
 rm -f "$TARGET_HOME/.cache/focaltech_enrolled.bin" 2>/dev/null || true
+
+# Keep old ELF backups out of the library directory. They carry the same SONAME
+# and ldconfig can select one of them for libfprint-2.so.2 instead of our build.
+BACKUP_ROOT="/root/libfprint-backups"
+mkdir -p "$BACKUP_ROOT"
+BACKUP_DIR=$(mktemp -d "$BACKUP_ROOT/setup-XXXXXX")
+for old_lib in "$LIB_DIR"/libfprint-2.so.2.0.0.* "$ALT_LIB_DIR"/libfprint-2.so.2.0.0.*; do
+    if [ -f "$old_lib" ]; then
+        echo "[*] Moving old libfprint backup out of the loader directory: $old_lib"
+        mv "$old_lib" "$BACKUP_DIR/"
+    fi
+done
 
 cp -f "$SCRIPT_DIR/libfprint-2.so.2.0.0" "$LIB_DIR/libfprint-2.so.2.0.0"
 chmod 644 "$LIB_DIR/libfprint-2.so.2.0.0"
+
+install -D -m 644 "$ENGINE_DLL_SOURCE" "$ENGINE_INSTALL_PATH"
+if [ -n "$ENGINE_TMP_DIR" ]; then
+    rm -rf "$ENGINE_TMP_DIR"
+    ENGINE_TMP_DIR=""
+fi
+echo "[+] Installed FocalTech host matcher to $ENGINE_INSTALL_PATH"
 
 # Point soname symlinks directly to the patched 2.0.0 binary
 ln -sf libfprint-2.so.2.0.0 "$LIB_DIR/libfprint-2.so.2"
@@ -117,6 +184,12 @@ if [ -d "$ALT_LIB_DIR" ]; then
 fi
 
 ldconfig
+ACTIVE_LIB=$(readlink -f "$LIB_DIR/libfprint-2.so.2")
+EXPECTED_LIB=$(readlink -f "$LIB_DIR/libfprint-2.so.2.0.0")
+if [ "$ACTIVE_LIB" != "$EXPECTED_LIB" ]; then
+    echo "[-] libfprint soname resolves to $ACTIVE_LIB, expected $EXPECTED_LIB" >&2
+    exit 1
+fi
 echo "[+] Successfully installed patched libfprint to $LIB_DIR/libfprint-2.so.2"
 
 # 5. Configure PAM for Hyprlock / Quickshell

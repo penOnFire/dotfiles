@@ -31,7 +31,6 @@ RESET = "\033[0m"
 
 class FingerprintTester:
     def __init__(self):
-        self._reset_usb_sensor()
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         self.loop = GLib.MainLoop()
         self.username = pwd.getpwuid(os.getuid()).pw_name
@@ -41,33 +40,12 @@ class FingerprintTester:
         self.rearm_timer = None
         self.is_scanning = False
         self.is_enrolling = False
+        self.enroll_total_stages = 0
 
         signal.signal(signal.SIGINT, self.cleanup)
         signal.signal(signal.SIGTERM, self.cleanup)
 
         self._connect_dbus()
-
-    @staticmethod
-    def _reset_usb_sensor():
-        try:
-            import ctypes, ctypes.util
-            libusb = ctypes.CDLL(ctypes.util.find_library('usb-1.0'))
-            ctx = ctypes.c_void_p()
-            libusb.libusb_init(ctypes.byref(ctx))
-            handle = libusb.libusb_open_device_with_vid_pid(ctx, 0x2808, 0xc6d5)
-            if handle:
-                pkt = bytearray([0x02, 0x00, 0x02, 0x82, 0x78, 0x02 ^ 0x82 ^ 0x78])
-                trans = ctypes.c_int()
-                buf = (ctypes.c_ubyte * len(pkt))(*pkt)
-                if libusb.libusb_claim_interface(handle, 0) == 0:
-                    libusb.libusb_bulk_transfer(handle, 0x01, buf, len(pkt), ctypes.byref(trans), 500)
-                    rbuf = (ctypes.c_ubyte * 64)()
-                    libusb.libusb_bulk_transfer(handle, 0x82, rbuf, 64, ctypes.byref(trans), 500)
-                    libusb.libusb_release_interface(handle, 0)
-                libusb.libusb_close(handle)
-            libusb.libusb_exit(ctx)
-        except Exception:
-            pass
 
     def _connect_dbus(self):
         try:
@@ -247,12 +225,12 @@ class FingerprintTester:
 
     def _on_props_changed(self, interface, changed, invalidated):
         if "finger-present" in changed and bool(changed["finger-present"]):
-            print(f"\r{YELLOW}[⚡] Finger detected! Reading minutiae...{RESET}                 ", end="", flush=True)
+            print(f"\r{YELLOW}[⚡] Finger detected! Capturing fingerprint...{RESET}                 ", end="", flush=True)
 
     def _on_verify_status(self, result, done):
         if result == "verify-match":
             print(f"\r{BOLD}{GREEN}[✓] MATCH SUCCESS! Fingerprint verified successfully!{RESET}      \n")
-            print(f"    {DIM}Sensor hardware, driver, and stored template are 100% matched.{RESET}\n")
+            print(f"    {DIM}The saved fingerprint template matched this capture.{RESET}\n")
             try:
                 self.device.VerifyStop()
             except Exception:
@@ -260,7 +238,7 @@ class FingerprintTester:
             self.is_scanning = False
             self._schedule_rearm(600)
         elif result == "verify-no-match":
-            print(f"\r{BOLD}{RED}[✗] NO MATCH! Sensor minutiae did not match template.{RESET}       \n")
+            print(f"\r{BOLD}{RED}[✗] NO MATCH! The saved template did not match this capture.{RESET}       \n")
             print(f"    {YELLOW}Action: Lift your finger and try again with your authentic enrolled finger.{RESET}\n")
             try:
                 self.device.VerifyStop()
@@ -304,7 +282,9 @@ class FingerprintTester:
             return
 
         self.enroll_stage = 0
+        self.enroll_total_stages = total_stages
         self.dev_obj.connect_to_signal("EnrollStatus", self._on_enroll_status, dbus_interface="net.reactivated.Fprint.Device")
+        self.dev_obj.connect_to_signal("PropertiesChanged", self._on_props_changed, dbus_interface="org.freedesktop.DBus.Properties")
 
         try:
             self.device.EnrollStart("right-index-finger")
@@ -324,11 +304,8 @@ class FingerprintTester:
             pct = int((self.enroll_stage / total_stages) * 100)
             bar = "█" * (self.enroll_stage * 2) + "░" * ((total_stages - self.enroll_stage) * 2)
             print(f"{GREEN}[✓] Stage {self.enroll_stage}/{total_stages} passed! [{bar}] {pct}%{RESET}")
-            if not done:
-                if self.enroll_stage == total_stages - 1:
-                    print(f"\n{BOLD}{CYAN}[{total_stages}/{total_stages}] Final confirmation: place finger one last time to burn template into sensor...{RESET}", flush=True)
-                else:
-                    print(f"{BOLD}[{self.enroll_stage + 1}/{total_stages}] Lift finger and place it down again...{RESET}", flush=True)
+            if not done and self.enroll_stage < total_stages:
+                print(f"{BOLD}[{self.enroll_stage + 1}/{total_stages}] Lift finger and place it down again...{RESET}", flush=True)
         elif result == "enroll-completed":
             try:
                 self.device.EnrollStop()
