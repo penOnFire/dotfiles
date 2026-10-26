@@ -103,9 +103,8 @@ for dev in /sys/bus/usb/devices/*; do
     fi
 done
 
-echo "[*] Removing poisoned .bak libraries and clearing old enrolled prints for clean slate..."
+echo "[*] Installing patched libfprint driver..."
 rm -f "$LIB_DIR/libfprint-2.so.2.0.0.bak" "$ALT_LIB_DIR/libfprint-2.so.2.0.0.bak" 2>/dev/null || true
-rm -rf /var/lib/fprint/* 2>/dev/null || true
 rm -f "$TARGET_HOME/.cache/focaltech_enrolled.bin" 2>/dev/null || true
 
 cp -f "$SCRIPT_DIR/libfprint-2.so.2.0.0" "$LIB_DIR/libfprint-2.so.2.0.0"
