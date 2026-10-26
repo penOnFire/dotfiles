@@ -103,8 +103,10 @@ for dev in /sys/bus/usb/devices/*; do
     fi
 done
 
-echo "[*] Removing poisoned .bak libraries and pointing symlinks to patched driver..."
+echo "[*] Removing poisoned .bak libraries and clearing old enrolled prints for clean slate..."
 rm -f "$LIB_DIR/libfprint-2.so.2.0.0.bak" "$ALT_LIB_DIR/libfprint-2.so.2.0.0.bak" 2>/dev/null || true
+rm -rf /var/lib/fprint/* 2>/dev/null || true
+rm -f "$TARGET_HOME/.cache/focaltech_enrolled.bin" 2>/dev/null || true
 
 cp -f "$SCRIPT_DIR/libfprint-2.so.2.0.0" "$LIB_DIR/libfprint-2.so.2.0.0"
 chmod 644 "$LIB_DIR/libfprint-2.so.2.0.0"
@@ -148,7 +150,7 @@ echo "[+] Fingerprint driver and PAM integration successfully configured!"
 echo "    Device: FocalTech Fingerprint Device ($DEVICE_ID)"
 echo "======================================================================="
 echo "    To enroll your fingerprint now, run:"
-echo "        fprintd-enroll"
-echo "    Then test verification with:"
-echo "        fprintd-verify"
+echo "        test-fingerprint enroll"
+echo "    Then test live verification with:"
+echo "        test-fingerprint"
 echo "======================================================================="

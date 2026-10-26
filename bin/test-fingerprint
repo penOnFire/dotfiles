@@ -39,6 +39,7 @@ class FingerprintTester:
         self.dev_obj = None
         self.rearm_timer = None
         self.is_scanning = False
+        self.is_enrolling = False
 
         signal.signal(signal.SIGINT, self.cleanup)
         signal.signal(signal.SIGTERM, self.cleanup)
@@ -115,14 +116,18 @@ class FingerprintTester:
                 pass
             self.rearm_timer = None
         if self.device and self.claimed:
-            try:
-                self.device.VerifyStop()
-            except Exception:
-                pass
-            try:
-                self.device.EnrollStop()
-            except Exception:
-                pass
+            if self.is_scanning:
+                try:
+                    self.device.VerifyStop()
+                except Exception:
+                    pass
+                self.is_scanning = False
+            if self.is_enrolling:
+                try:
+                    self.device.EnrollStop()
+                except Exception:
+                    pass
+                self.is_enrolling = False
             self.release()
         if self.loop and self.loop.is_running():
             self.loop.quit()
@@ -166,6 +171,7 @@ class FingerprintTester:
     def _start_verify(self):
         try:
             self.device.VerifyStart("any")
+            self.is_scanning = True
             print(f"\r{BOLD}{CYAN}[•]{RESET} {BOLD}Ready! Touch the fingerprint sensor now...{RESET}       ", end="", flush=True)
         except Exception as e:
             print(f"\n{RED}[-] VerifyStart error: {e}{RESET}")
@@ -184,6 +190,7 @@ class FingerprintTester:
             return False
         try:
             self.device.VerifyStart("any")
+            self.is_scanning = True
             print(f"\r{BOLD}{CYAN}[•]{RESET} {BOLD}Ready! Touch the fingerprint sensor now...{RESET}       ", end="", flush=True)
             return False
         except dbus.DBusException as e:
@@ -252,6 +259,7 @@ class FingerprintTester:
 
         try:
             self.device.EnrollStart("right-index-finger")
+            self.is_enrolling = True
             print(f"{BOLD}[1/{total_stages}] Place your finger on the sensor...{RESET}", flush=True)
             self.loop.run()
         except dbus.DBusException as e:
@@ -270,6 +278,7 @@ class FingerprintTester:
             if not done:
                 print(f"{BOLD}[{self.enroll_stage + 1}/{total_stages}] Lift finger and place it down again...{RESET}", flush=True)
         elif result == "enroll-completed":
+            self.is_enrolling = False
             print(f"\n{BOLD}{GREEN}🎉 ENROLLMENT COMPLETED SUCCESSFULLY!{RESET}")
             print(f"   Your fingerprint template is saved and active for Touch ID.\n")
             GLib.idle_add(self.cleanup)
