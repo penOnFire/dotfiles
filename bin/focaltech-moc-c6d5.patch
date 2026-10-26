@@ -30,17 +30,53 @@
 +    }
  
    fpi_device_open_complete (FP_DEVICE (self), g_steal_pointer (&error));
-@@ -555,8 +566,8 @@ focaltech_moc_get_enroll_times (FpiDeviceFocaltechMoc *self,
+@@ -539,24 +550,23 @@ focaltech_moc_get_enroll_times (FpiDeviceFocaltechMoc *self,
+   if (error)
+     {
+-      fpi_ssm_mark_failed (self->task_ssm, error);
++      fp_warn ("focaltech_moc_get_enroll_times error: %s, defaulting to 10 stages", error->message);
++      fpi_device_set_nr_enroll_stages (FP_DEVICE (self), 10);
++      fpi_ssm_next_state (self->task_ssm);
+       return;
+     }
+ 
+   fp_cmd = (FpCmd *) buffer_in;
+   enroll_times = (struct EnrollTimes *) (fp_cmd + 1);
+ 
+-  if (fp_cmd->code != 0x04)
++  if (fp_cmd == NULL || fp_cmd->code != 0x04)
+     {
+-      fpi_ssm_mark_failed (self->task_ssm,
+-                           fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+-                                                     "Can't get response!!"));
++      fp_warn ("Could not get enroll times from device (code 0x%02x), defaulting to 10 stages",
++               fp_cmd ? fp_cmd->code : 0);
++      fpi_device_set_nr_enroll_stages (FP_DEVICE (self), 10);
++      fpi_ssm_next_state (self->task_ssm);
+     }
    else
      {
 -      fp_dbg ("focaltechmoc enroll_times: %d", enroll_times->enroll_times + 1);
 -      fpi_device_set_nr_enroll_stages (FP_DEVICE (self), enroll_times->enroll_times + 1);
-+      fp_dbg ("focaltechmoc enroll_times: %d", enroll_times->enroll_times);
-+      fpi_device_set_nr_enroll_stages (FP_DEVICE (self), enroll_times->enroll_times);
++      int stages = enroll_times->enroll_times > 0 ? enroll_times->enroll_times : 10;
++      fp_info ("focaltechmoc enroll_times: %d", stages);
++      fpi_device_set_nr_enroll_stages (FP_DEVICE (self), stages);
        fpi_ssm_next_state (self->task_ssm);
      }
  }
-@@ -1335,7 +1346,8 @@ focaltech_moc_enroll_capture_cb (FpiDeviceFocaltechMoc *self,
+@@ -636,8 +646,8 @@ focaltech_moc_open (FpDevice *device)
+   GError *error = NULL;
+ 
+   if (!g_usb_device_reset (fpi_device_get_usb_device (device), &error))
+     {
+-      fpi_device_open_complete (FP_DEVICE (self), g_steal_pointer (&error));
+-      return;
++      fp_dbg ("g_usb_device_reset failed: %s", error ? error->message : "unknown");
++      g_clear_error (&error);
+     }
+ 
+   if (usb_claim_interface_probe (device, 1, &error) != 0)
+@@ -1349,7 +1359,8 @@ focaltech_moc_enroll_capture_cb (FpiDeviceFocaltechMoc *self,
            enroll_status_report (self, ENROLL_RSP_RETRY, self->num_frames, NULL);
          }
  
