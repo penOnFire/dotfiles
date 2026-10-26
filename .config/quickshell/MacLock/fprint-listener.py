@@ -68,10 +68,9 @@ def cleanup(*args):
             log(f"Release exception: {e}")
         claimed = False
     if loop and loop.is_running():
-        loop.quit()
-    sys.exit(0)
+        GLib.idle_add(loop.quit)
 
-def schedule_rearm(delay_ms=150):
+def schedule_rearm(delay_ms=200):
     global rearm_timer
     if rearm_timer:
         try:
@@ -95,8 +94,9 @@ def do_rearm():
         name = e.get_dbus_name()
         log(f"rearm DBusException: {name} - {e}")
         if "AlreadyInUse" in name or "AlreadyInUse" in str(e):
-            # Previous verify session still finalizing in fprintd; retry after short interval
-            rearm_timer = GLib.timeout_add(120, do_rearm)
+            # Verification already active and listening
+            emit("ready_waiting")
+            return False
         elif "ClaimDevice" in name:
             try:
                 username = pwd.getpwuid(os.getuid()).pw_name
@@ -118,15 +118,16 @@ def on_verify_status(result, done):
         cleanup()
     elif result == "verify-no-match":
         emit("no-match")
-        schedule_rearm(150)
+        if done:
+            schedule_rearm(200)
     elif result in ("verify-swipe-too-short", "verify-finger-not-centered", "verify-remove-and-retry", "verify-retry-scan"):
         emit("retry", reason=result)
         if done:
-            schedule_rearm(150)
+            schedule_rearm(200)
     else:
         emit("status", result=result)
         if done:
-            schedule_rearm(150)
+            schedule_rearm(200)
 
 def on_verify_finger_selected(finger_name):
     log(f"on_verify_finger_selected: {finger_name}")
@@ -180,14 +181,14 @@ def main():
 
         # Claim with retry in case previous locker just exited
         claimed = False
-        for attempt in range(4):
+        for attempt in range(15):
             try:
                 device.Claim(username)
                 claimed = True
                 break
             except dbus.DBusException as ce:
-                if "AlreadyInUse" in ce.get_dbus_name() and attempt < 3:
-                    time.sleep(0.15)
+                if "AlreadyInUse" in ce.get_dbus_name() and attempt < 14:
+                    time.sleep(0.2)
                     continue
                 raise
 
