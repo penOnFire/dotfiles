@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""
+test-fingerprint - Standalone fingerprint diagnostic and testing tool
+Allows testing scanning, verification, and enrollment of FocalTech sensor (2808:c6d5).
+"""
+
+import sys
+import os
+import signal
+import time
+import pwd
+
+try:
+    import dbus
+    import dbus.mainloop.glib
+    from gi.repository import GLib
+except ImportError as e:
+    print(f"\033[91m[-] Missing required Python libraries: {e}\033[0m")
+    print("    Install them with: sudo apt install python3-dbus python3-gi")
+    sys.exit(1)
+
+# ANSI Colors
+BOLD = "\033[1m"
+GREEN = "\033[92m"
+RED = "\033[91m"
+YELLOW = "\033[93m"
+CYAN = "\033[96m"
+MAGENTA = "\033[95m"
+DIM = "\033[2m"
+RESET = "\033[0m"
+
+class FingerprintTester:
+    def __init__(self):
+        dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+        self.loop = GLib.MainLoop()
+        self.username = pwd.getpwuid(os.getuid()).pw_name
+        self.claimed = False
+        self.device = None
+        self.dev_obj = None
+        self.rearm_timer = None
+        self.is_scanning = False
+
+        signal.signal(signal.SIGINT, self.cleanup)
+        signal.signal(signal.SIGTERM, self.cleanup)
+
+        self._connect_dbus()
+
+    def _connect_dbus(self):
+        try:
+            self.bus = dbus.SystemBus()
+            fprint_obj = self.bus.get_object("net.reactivated.Fprint", "/net/reactivated/Fprint/Manager")
+            fprint_mgr = dbus.Interface(fprint_obj, "net.reactivated.Fprint.Manager")
+            self.dev_path = fprint_mgr.GetDefaultDevice()
+            self.dev_obj = self.bus.get_object("net.reactivated.Fprint", self.dev_path)
+            self.device = dbus.Interface(self.dev_obj, "net.reactivated.Fprint.Device")
+            self.props = dbus.Interface(self.dev_obj, "org.freedesktop.DBus.Properties")
+        except dbus.DBusException as e:
+            print(f"{RED}[-] Error connecting to fprintd: {e.get_dbus_name()}{RESET}")
+            print("    Make sure fprintd service is active: sudo systemctl restart fprintd")
+            sys.exit(1)
+
+    def get_device_info(self):
+        try:
+            name = self.props.Get("net.reactivated.Fprint.Device", "name")
+            scan_type = self.props.Get("net.reactivated.Fprint.Device", "scan-type")
+            stages = self.props.Get("net.reactivated.Fprint.Device", "num-enroll-stages")
+            return {
+                "name": str(name),
+                "scan_type": str(scan_type),
+                "num_stages": int(stages),
+                "path": str(self.dev_path)
+            }
+        except Exception:
+            return {"name": "FocalTech Fingerprint Sensor", "scan_type": "press", "num_stages": 11, "path": str(self.dev_path)}
+
+    def list_fingers(self):
+        try:
+            fingers = self.device.ListEnrolledFingers(self.username)
+            return [str(f) for f in fingers]
+        except dbus.DBusException as e:
+            if "NoEnrolledPrints" in str(e):
+                return []
+            return []
+
+    def claim(self):
+        if self.claimed:
+            return True
+        for attempt in range(3):
+            try:
+                self.device.Claim(self.username)
+                self.claimed = True
+                return True
+            except dbus.DBusException as e:
+                if "AlreadyInUse" in str(e):
+                    time.sleep(0.2)
+                    continue
+                print(f"{RED}[-] Failed to claim device: {e.get_dbus_name()}{RESET}")
+                return False
+        print(f"{RED}[-] Device is currently claimed by another process. Ensure lockscreen is closed.{RESET}")
+        return False
+
+    def release(self):
+        if self.device and self.claimed:
+            try:
+                self.device.Release()
+            except Exception:
+                pass
+            self.claimed = False
+
+    def cleanup(self, *args):
+        if self.rearm_timer:
+            try:
+                GLib.source_remove(self.rearm_timer)
+            except Exception:
+                pass
+            self.rearm_timer = None
+        if self.device and self.claimed:
+            try:
+                self.device.VerifyStop()
+            except Exception:
+                pass
+            self.release()
+        if self.loop and self.loop.is_running():
+            self.loop.quit()
+        print(f"\n{DIM}[*] Scanner closed.{RESET}")
+        sys.exit(0)
+
+    # ── Interactive Scan Mode ──
+    def run_scanner(self):
+        info = self.get_device_info()
+        fingers = self.list_fingers()
+
+        print(f"{BOLD}{CYAN}=================================================================={RESET}")
+        print(f"{BOLD}{CYAN}            FocalTech Fingerprint Sensor Test Tool               {RESET}")
+        print(f"{BOLD}{CYAN}=================================================================={RESET}")
+        print(f" {BOLD}Device:{RESET}      {info['name']} ({info['scan_type']})")
+        print(f" {BOLD}User:{RESET}        {self.username}")
+        if fingers:
+            print(f" {BOLD}Enrolled:{RESET}    {GREEN}{', '.join(fingers)}{RESET}")
+        else:
+            print(f" {BOLD}Enrolled:{RESET}    {YELLOW}No fingerprints enrolled yet!{RESET}")
+            print(f"              Run {BOLD}test-fingerprint enroll{RESET} first.")
+            return
+
+        print(f"{CYAN}------------------------------------------------------------------{RESET}")
+        print(f" {BOLD}Instructions:{RESET}")
+        print(f"  • Rest your finger flat on the sensor pad (power button).")
+        print(f"  • Keep it steady for 1 second until the result appears.")
+        print(f"  • Press {BOLD}Ctrl+C{RESET} to exit anytime.")
+        print(f"{CYAN}------------------------------------------------------------------{RESET}\n")
+
+        if not self.claim():
+            return
+
+        # Setup callbacks
+        self.dev_obj.connect_to_signal("VerifyStatus", self._on_verify_status, dbus_interface="net.reactivated.Fprint.Device")
+        self.dev_obj.connect_to_signal("VerifyFingerSelected", self._on_finger_selected, dbus_interface="net.reactivated.Fprint.Device")
+        self.dev_obj.connect_to_signal("PropertiesChanged", self._on_props_changed, dbus_interface="org.freedesktop.DBus.Properties")
+
+        self._start_verify()
+        self.loop.run()
+
+    def _start_verify(self):
+        try:
+            self.device.VerifyStart("any")
+            print(f"\r{BOLD}{CYAN}[•]{RESET} {BOLD}Ready! Touch the fingerprint sensor now...{RESET}       ", end="", flush=True)
+        except Exception as e:
+            print(f"\n{RED}[-] VerifyStart error: {e}{RESET}")
+
+    def _schedule_rearm(self, delay_ms=180):
+        if self.rearm_timer:
+            try:
+                GLib.source_remove(self.rearm_timer)
+            except Exception:
+                pass
+        self.rearm_timer = GLib.timeout_add(delay_ms, self._do_rearm)
+
+    def _do_rearm(self):
+        self.rearm_timer = None
+        if not self.claimed or not self.device:
+            return False
+        try:
+            self.device.VerifyStart("any")
+            print(f"\r{BOLD}{CYAN}[•]{RESET} {BOLD}Ready! Touch the fingerprint sensor now...{RESET}       ", end="", flush=True)
+            return False
+        except dbus.DBusException as e:
+            if "AlreadyInUse" in str(e):
+                self.rearm_timer = GLib.timeout_add(100, self._do_rearm)
+            return False
+        except Exception:
+            return False
+
+    def _on_finger_selected(self, finger):
+        pass
+
+    def _on_props_changed(self, interface, changed, invalidated):
+        if "finger-present" in changed and bool(changed["finger-present"]):
+            print(f"\r{YELLOW}[⚡] Finger detected! Reading minutiae...{RESET}                 ", end="", flush=True)
+
+    def _on_verify_status(self, result, done):
+        if result == "verify-match":
+            print(f"\r{BOLD}{GREEN}[✓] MATCH SUCCESS! Fingerprint verified successfully!{RESET}      \n")
+            print(f"    {DIM}Sensor hardware, driver, and stored template are 100% matched.{RESET}\n")
+            self._schedule_rearm(500)
+        elif result == "verify-no-match":
+            print(f"\r{BOLD}{RED}[✗] NO MATCH! Sensor minutiae did not match template.{RESET}       ")
+            print(f"    {YELLOW}Tip: Press flat across the center and hold steady.{RESET}")
+            self._schedule_rearm(200)
+        elif result == "verify-swipe-too-short":
+            print(f"\r{YELLOW}[!] Hold finger longer on the sensor...{RESET}                     ")
+            self._schedule_rearm(200)
+        elif result == "verify-finger-not-centered":
+            print(f"\r{YELLOW}[!] Center your finger directly on the sensor pad...{RESET}       ")
+            self._schedule_rearm(200)
+        elif result in ("verify-retry-scan", "verify-remove-and-retry"):
+            print(f"\r{YELLOW}[!] Please lift and press down again...{RESET}                     ")
+            self._schedule_rearm(200)
+        else:
+            if done:
+                self._schedule_rearm(200)
+
+    # ── Interactive Enrollment Mode ──
+    def run_enrollment(self):
+        info = self.get_device_info()
+        total_stages = info["num_stages"]
+
+        print(f"{BOLD}{MAGENTA}=================================================================={RESET}")
+        print(f"{BOLD}{MAGENTA}             Fingerprint Enrollment (11 Stages)                  {RESET}")
+        print(f"{BOLD}{MAGENTA}=================================================================={RESET}")
+        print(f" Enrolling: {BOLD}right-index-finger{RESET} for user {BOLD}{self.username}{RESET}\n")
+        print(f" {BOLD}Best Practice for 100% Accuracy:{RESET}")
+        print(f"  • {BOLD}Stages 1–4:{RESET} Center of your finger pad, flat and steady.")
+        print(f"  • {BOLD}Stages 5–7:{RESET} Roll slightly left and right for edge coverage.")
+        print(f"  • {BOLD}Stages 8–11:{RESET} Slightly higher (tip) and lower (pad base).\n")
+
+        if not self.claim():
+            return
+
+        self.enroll_stage = 0
+        self.dev_obj.connect_to_signal("EnrollStatus", self._on_enroll_status, dbus_interface="net.reactivated.Fprint.Device")
+
+        try:
+            self.device.EnrollStart("right-index-finger")
+            print(f"{BOLD}[1/{total_stages}] Place your finger on the sensor...{RESET}", flush=True)
+            self.loop.run()
+        except dbus.DBusException as e:
+            print(f"{RED}[-] Enroll error: {e}{RESET}")
+            self.cleanup()
+
+    def _on_enroll_status(self, result, done):
+        info = self.get_device_info()
+        total_stages = info["num_stages"]
+
+        if result == "enroll-stage-passed":
+            self.enroll_stage += 1
+            pct = int((self.enroll_stage / total_stages) * 100)
+            bar = "█" * (self.enroll_stage * 2) + "░" * ((total_stages - self.enroll_stage) * 2)
+            print(f"{GREEN}[✓] Stage {self.enroll_stage}/{total_stages} passed! [{bar}] {pct}%{RESET}")
+            if not done:
+                print(f"{BOLD}[{self.enroll_stage + 1}/{total_stages}] Lift finger and place it down again...{RESET}", flush=True)
+        elif result == "enroll-completed":
+            print(f"\n{BOLD}{GREEN}🎉 ENROLLMENT COMPLETED SUCCESSFULLY!{RESET}")
+            print(f"   Your fingerprint template is saved and active for Touch ID.\n")
+            self.cleanup()
+        elif result == "enroll-retry-scan":
+            print(f"{YELLOW}[!] Lift finger and try pressing firmly again...{RESET}", flush=True)
+        elif result == "enroll-swipe-too-short":
+            print(f"{YELLOW}[!] Hold your finger steady for a moment longer...{RESET}", flush=True)
+        elif result == "enroll-finger-not-centered":
+            print(f"{YELLOW}[!] Place the center of your finger pad on the sensor...{RESET}", flush=True)
+        elif result == "enroll-failed":
+            print(f"{RED}[-] Enrollment failed. Please run again.{RESET}")
+            self.cleanup()
+
+
+def main():
+    action = sys.argv[1] if len(sys.argv) > 1 else "scan"
+
+    tester = FingerprintTester()
+
+    if action in ("scan", "verify", "test"):
+        tester.run_scanner()
+    elif action in ("enroll", "add"):
+        tester.run_enrollment()
+    elif action in ("list", "ls"):
+        fingers = tester.list_fingers()
+        info = tester.get_device_info()
+        print(f"Device: {info['name']}")
+        print(f"User:   {tester.username}")
+        if fingers:
+            print(f"Enrolled Fingers ({len(fingers)}):")
+            for i, f in enumerate(fingers):
+                print(f"  [{i}] {GREEN}{f}{RESET}")
+        else:
+            print("No enrolled fingerprints found.")
+    elif action in ("delete", "rm", "clear"):
+        try:
+            tester.claim()
+            tester.device.DeleteEnrolledFingers(tester.username)
+            tester.release()
+            print(f"{GREEN}[✓] Enrolled fingerprints deleted for {tester.username}.{RESET}")
+        except Exception as e:
+            print(f"{RED}[-] Failed to delete prints: {e}{RESET}")
+    else:
+        print(f"Usage: test-fingerprint [scan|enroll|list|delete]")
+        print("  scan   - Interactive live scanner (default)")
+        print("  enroll - Re-enroll right-index-finger with visual guide")
+        print("  list   - List registered fingerprints")
+        print("  delete - Clear enrolled fingerprints")
+
+
+if __name__ == "__main__":
+    main()
