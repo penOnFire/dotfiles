@@ -304,6 +304,10 @@ class FingerprintTester:
             if not done:
                 print(f"{BOLD}[{self.enroll_stage + 1}/{total_stages}] Lift finger and place it down again...{RESET}", flush=True)
         elif result == "enroll-completed":
+            try:
+                self.device.EnrollStop()
+            except Exception:
+                pass
             self.is_enrolling = False
             print(f"\n{BOLD}{GREEN}🎉 ENROLLMENT COMPLETED SUCCESSFULLY!{RESET}")
             print(f"   Your fingerprint template is saved and active for Touch ID.\n")
