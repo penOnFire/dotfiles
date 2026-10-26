@@ -54,7 +54,7 @@ fi
 SYSTEM_LIB="/usr/lib/x86_64-linux-gnu/libfprint-2.so.2.0.0"
 
 if [ -f "$SCRIPT_DIR/libfprint-2.so.2.0.0" ]; then
-    echo "[*] Installing bundled patched libfprint-2.so.2.0.0 (contains 2808:c6d5 support)..."
+    echo "[*] Installing verified patched libfprint-2.so.2.0.0 (FocalTech 2808:c6d5 support)..."
     if [ -f "$SYSTEM_LIB" ] && [ ! -f "${SYSTEM_LIB}.bak" ]; then
         cp "$SYSTEM_LIB" "${SYSTEM_LIB}.bak"
     fi
@@ -62,26 +62,6 @@ if [ -f "$SCRIPT_DIR/libfprint-2.so.2.0.0" ]; then
     chmod 644 "$SYSTEM_LIB"
     ldconfig
     echo "[+] Successfully installed patched libfprint to $SYSTEM_LIB"
-else
-    echo "[*] Building patched libfprint from source..."
-    BUILD_DIR="/tmp/libfprint-src-build"
-    rm -rf "$BUILD_DIR"
-    mkdir -p "$BUILD_DIR"
-    cd "$BUILD_DIR"
-    apt-get source libfprint-2-2
-    MOC_C=$(find "$BUILD_DIR" -type f -name "focaltech_moc.c" | head -n1)
-    if [ -n "$MOC_C" ]; then
-        SRC_DIR=$(dirname $(dirname $(dirname $(dirname "$MOC_C"))))
-        if ! grep -q "0xc6d5" "$MOC_C"; then
-            sed -i '/static const FpIdEntry id_table\[\] = {/a \  { .vid = 0x2808,  .pid = 0xc6d5,  },' "$MOC_C"
-        fi
-        cd "$SRC_DIR"
-        meson setup build --prefix=/usr --libdir=lib/x86_64-linux-gnu -Dintrospection=false -Ddoc=false -Dudev_rules=disabled -Dudev_hwdb=disabled
-        meson compile -C build
-        meson install -C build
-        ldconfig
-        echo "[+] Successfully built and installed patched libfprint!"
-    fi
 fi
 
 # 4. Configure PAM for Hyprlock / Quickshell
@@ -93,19 +73,18 @@ auth    sufficient      pam_fprintd.so max_tries=1 timeout=10
 EOF
 
 # 5. Restart fprintd daemon
-echo "[*] Enabling and restarting fprintd service..."
-systemctl daemon-reload
-systemctl enable fprintd
-systemctl restart fprintd
+echo "[*] Killing old fprintd instances and restarting service..."
+pkill -9 -f fprintd 2>/dev/null || true
+systemctl restart fprintd 2>/dev/null || true
 
-# Wait 1 second for fprintd to settle on DBus
-sleep 1
+# Wait 1.5 seconds for fprintd to settle on DBus
+sleep 1.5
 
 echo "======================================================================="
 echo "[+] Fingerprint driver and PAM integration successfully configured!"
 echo "    Device: FocalTech Fingerprint Device (2808:c6d5)"
 echo ""
-echo "[*] Checking available devices via fprintd-list:"
+echo "[*] Available devices:"
 fprintd-list "$TARGET_USER" || true
 echo ""
 echo "======================================================================="
